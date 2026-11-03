@@ -6,6 +6,26 @@
 
 ---
 
+## 为什么做这个（作者背景）
+
+我是影视导演，不是程序员。**这个插件全程由 AI 编写，我一行代码都没看过。**
+
+我做影视工作流，遇到的核心困难是：**我急需一个干净的上下文。**
+
+刚开始用 `multitask`，但发现**依旧不够干净**。于是只能自己用 AI 做。
+
+做的途中领悟了一件事：**其实根本不需要会话有「读」的功能，它只需要了解它需要的东西。**
+
+做完发现一个人生的真谛：**人生的上下文只有这么长，一定要用大部分时间去做自己愿意做的事。**
+
+技术上怎么落到这套代码上：读文件会吃掉上下文，所以把「读」这件事交给工人——主对话的 `read` 与 `grep` 一起从工具面上摘掉（留 `grep` 等于留半个 `read`，纪律不成立），只保留两类验证工具：`file_info`（查文件类型 / 是否存在 / 字节数）和 `read_image`（看图）。这个取舍是有意识的：**代价是规划者看不到文件内容**，想知道里面写了什么，只能靠 brief 再派一个人去看，并要求带回行号和原文；**换来的是上下文不被文件内容吃掉**，主对话只承载结论和判断。所以 brief 必须自包含，验证必须换人做，汇报必须带证据——这三条不是风格要求，是这个交换成立的前提。
+
+发出来只是为了让朋友们装起来方便——不是产品，没有客服，也没有维护承诺。代码里会有粗糙的地方，取舍也带着明显的个人偏好。**能用，但别当作品看。**
+
+**如果你的活更复杂，我更推荐你去装 `dsh-multitask`。** 它功能比我这个强大得多，而且是正经维护的。我这个只是个人用的一个极端取舍：把读取工具彻底从规划者手上摘掉，换一个干净的上下文。
+
+---
+
 ## 它解决什么问题
 
 主对话上下文是最贵的资源。一个"顺手读一下文件看看"的动作，代价是把整份文件塞进主对话，此后每一轮都要为它付费，直到压缩掉。黑猪模式不是靠提示词劝模型少读，而是**把读的工具从工具面上摘掉**——工具不在，就调不了。
@@ -206,22 +226,6 @@ preset id 固定是 `blackpigmodel`，不能两个 bundle 各声明一次。会�
 
 ---
 
-## 设计背景与来历
-
-这一节的来历是作者本人的经历，不是第三人称的评论。
-
-> 我做影视工作流，遇到的核心困难是：**我急需一个干净的上下文。**
->
-> 刚开始用 `multitask`，但发现**依旧不够干净**。于是只能自己用 AI 做。
->
-> 做的途中领悟了一件事：**其实根本不需要会话有「读」的功能，它只需要了解它需要的东西。**
->
-> 做完发现一个人生的真谛：**人生的上下文只有这么长，一定要用大部分时间去做自己愿意做的事。**
-
-技术上怎么落到这套代码上：读文件会吃掉上下文，所以把「读」这件事交给工人——主对话的 `read` 与 `grep` 一起从工具面上摘掉（留 `grep` 等于留半个 `read`，纪律不成立），只保留两类验证工具：`file_info`（查文件类型 / 是否存在 / 字节数）和 `read_image`（看图）。这个取舍是有意识的：**代价是规划者看不到文件内容**，想知道里面写了什么，只能靠 brief 再派一个人去看，并要求带回行号和原文；**换来的是上下文不被文件内容吃掉**，主对话只承载结论和判断。所以 brief 必须自包含，验证必须换人做，汇报必须带证据——这三条不是风格要求，是这个交换成立的前提。
-
----
-
 ## 参考与致谢
 
 这套东西不是凭空造的，主要参考了两处。
@@ -239,31 +243,31 @@ preset id 固定是 `blackpigmodel`，不能两个 bundle 各声明一次。会�
 - 「Spawn 才支持独立 `agentPreset`，省略或 fork 继承父会话的组合」—— 来自 `docs/subsystems/subagent.md`
 - guard 的 `keep` / `extraDeny` 语义，以及 `deny = 可见集 − 保留集` 这个判据 —— 本项目 `guard-v10.mjs` 实现，行为照 DSH 的 agent scope 工具面 API
 
-**最后一句实话：** 我是导演，不是程序员。做这个东西纯粹是被逼的——我在完成自己的影视工作流时急需一个干净的上下文，手边没有现成的能用，只能自己把它拼出来。所以代码里会有粗糙的地方，取舍也带着明显的个人偏好。**能用，但别当作品看。**
-
 ---
 
 ## English summary
 
 `dsh-blackpig-mode` is an agent preset for DeepSeek Harness (DSH). The coordinator agent holds **no hands-on tools**: no file reads, no shell, no web search or fetch. Its only verification surface is `file_info` (file kind, existence, byte count) plus `read_image`. All actual work is delegated to subagents through a single required-argument tool, `subagent_preset`.
 
+### Origin
+
+I am a film director, not a programmer. **This plugin was written entirely by AI. I have never read a line of the code.**
+
+I work on film and video workflows, and the core difficulty I hit was this: **I badly needed a clean context.**
+
+At first I used `multitask`, but found it **still not clean enough**. So I had to build it myself with AI.
+
+Along the way I understood one thing: **a session does not actually need a "read" capability at all — it only needs to know the things it needs to know.**
+
+When it was done I realised something about life: **a person's context is only so long, so most of your time has to go to what you are willing to do.**
+
+I published it only so my friends could install it easily. It is not a product: no support, no maintenance promise.
+
+**If your work is more complex, I would recommend `dsh-multitask` instead.** It is far more capable than mine, and it is properly maintained. Mine is just one extreme personal trade-off: taking every read tool away from the coordinator in exchange for a clean context.
+
 Design intent: keep the main conversation's context free of process data. The coordinator compresses what it needs into a self-contained brief, delegates, and relays only conclusions that carry evidence. Verification must be done by someone other than the author of the work.
 
 Cost, stated plainly: the coordinator cannot see file contents. To learn what a file says it must spend another round trip. This is a deliberate trade, not a bug.
-
-### Origin
-
-This section is the author's own account, not a third-person commentary.
-
-> I work on film and video workflows, and the core difficulty I hit was this: **I badly needed a clean context.**
->
-> At first I used `multitask`, but found it **still not clean enough**. So I had to build it myself with AI.
->
-> Along the way I understood one thing: **a session does not actually need a "read" capability at all — it only needs to know the things it needs to know.**
->
-> When it was done I realised something about life: **a person's context is only so long, so most of your time has to go to what you are willing to do.**
-
-How that became this code: reading files eats context, so reading was handed to workers. The coordinator's `read` and `grep` are removed from its tool surface (keeping `grep` would leave half of `read`), leaving only two verification tools: `file_info` (file kind / existence / byte count) and `read_image`. The trade is deliberate: **the coordinator cannot see file contents** — to learn what a file says it must send someone to look and bring back line numbers and quoted text; in exchange **context is not eaten by file contents**, and the main conversation carries only conclusions and judgement. That is why briefs must be self-contained, why verification must be done by someone else, and why reports must carry evidence.
 
 Install, three ways in order of preference: `dsh.cmd plugin --profile <name> add github:tianmingtianming/dsh-blackpig-mode` (needs git); the v1.0.0 Release tarball URL (no git needed); or a local `.tgz` path after unpacking it and running `check.ps1` first. Full steps are in the Chinese section above.
 
@@ -271,7 +275,7 @@ Install, three ways in order of preference: `dsh.cmd plugin --profile <name> add
 
 Windows-first, DSH-only, requires the desktop CLI (`dsh.cmd`); no restart is normally needed (HMR recomposes the profile when `dsh.profile.bundles` changes) — restart only if HMR is off or the mode does not appear. MIT licensed.
 
-Built with heavy reference to **`dsh-multitask@1.2.25`**, a **third-party community plugin** (`https://github.com/Senguk520/dsh-multitask`) installed from GitHub — it is **not** bundled with DSH (with thanks), and to the official DSH docs on agent presets and bundles. The author is a film director, not a programmer; this exists because a clean context was needed for real production work and nothing off-the-shelf fit.
+Built with heavy reference to **`dsh-multitask@1.2.25`**, a **third-party community plugin** (`https://github.com/Senguk520/dsh-multitask`) installed from GitHub — it is **not** bundled with DSH (with thanks), and to the official DSH docs on agent presets and bundles.
 
 ---
 
