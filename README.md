@@ -21,6 +21,8 @@
 
 派活只有一个入口：`subagent_preset`（由 `blackpig-roster.mjs` 注册），`preset` 参数必填，无默认值。`subagent` / `subagent_fork` 在主对话上被 `extraDeny` 摘掉——因为前者会固定回落到 `agentPreset: "standard"`，后者压根不支持选模式，两条旧路径都会让活派错人且**不报错**。
 
+另一条路是 Agent Teams 的 `spawn_teammate`（只有你的工具表里真有它，才说明团队插件开着）。它和 `subagent_preset` 的区别要说清：**`spawn_teammate` 没有 `preset` 参数**，队友永远继承父会话自己的模式，你没法把它指到别的模式；**但它拿得到该模式的全套工具，确实能干活**，不是二传手。所以分工是：活需要「某个特定模式」→ `subagent_preset`；活需要「多轮协作、中途纠偏、两个帮手要对表」→ 队友。
+
 ---
 
 ## 安装
@@ -35,8 +37,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\check.ps1 -Profile <你的
 
 `check.ps1` 只读，不写任何文件。它检查 7 项：DSH 安装位置、profile 目录、`cordis.patch.yml` 里是否已有同 id 声明、`package.json` 是否已含本包名、`node_modules` 残留、`extraDeny` 是否误禁了 `subagent_preset`、以及 `-DryRun` 时的装包影响范围。
 
-- 退出码 `0`（READY）：可以装。
-- 退出码 `1`（NEEDS-CLEANUP）：有残留或冲突，先按它给出的行号清理。**其中「已有 `blackpigmodel` 声明」这一项它会直接报出行号**，把该行所在的整段 `- insert:` 块删掉再重跑。
+- 退出码 `0`（READY）：可以装。**干净的 profile（没有 `cordis.patch.yml`、没有同 id 冲突声明）返回的就是 0**，不是 1——早前版本会误报 1，现在不会。
+- 退出码 `1`（NEEDS-CLEANUP）：有残留或冲突，先按它给出的行号清理。**只有真冲突/真残留才返回 1**。「已有 `blackpigmodel` 声明」这一项它会直接报出行号，把该行所在的整段 `- insert:` 块删掉再重跑。
 - 退出码 `2`（BLOCKED）：找不到 `dsh.cmd` 或 profile 目录，环境不满足。
 
 ### 第 2 步：装
@@ -71,13 +73,19 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\verify.ps1 -Profile <你�
 
 它做 5 项核对：
 
-1. 包是否落盘到 `profiles\<名>\node_modules\dsh-blackpig-mode`，以及 11 个文件的字节数是否与内置期望值一致（`README.md` 不参与字节校验，允许编辑）
+1. 包是否落盘到 `profiles\<名>\node_modules\dsh-blackpig-mode`，以及核对包内文件字节：11 个条目里 **8 个参与字节校验**，`README.md` / `check.ps1` / `verify.ps1` 三个显示 `[SKIP]` 不参与（原因见本节末尾）
 2. `profiles\<名>\package.json` 的 `dependencies` 与 `dsh.profile.bundles` 是否都登记了本包
 3. `cordis.patch.yml` 里是否还残留旧的 `blackpigmodel` 声明
 4. `dsh --profile <名> --dump-config` 的退出码是否为 0，输出里 `preset-blackpigmodel` 是否恰好出现 1 次
 5. 汇总结论并给退出码（`0` 可直接使用 / `1` 有缺件或冲突 / `2` 环境不满足）
 
 关于第 4 项：`desktop` 这个 profile 由 Electron 独占，`dsh` CLI 会硬拒绝 `--dump-config`。此时 `verify.ps1` 会自动在 `%TEMP%` 下建一个影子 profile（复制 `package.json` 与 `cordis.patch.yml`，`node_modules` 用目录联接只读指回真 profile）来复核，跑完立即删除。真 profile 的 `node_modules` 不被写入。
+
+**为什么第 1 项里有三个 `[SKIP]`。** `README.md` 随文档更新，改一次字节就变，参与校验没有意义。`check.ps1` / `verify.ps1` 则是因为 `.gitattributes` 里写了 `*.ps1 text eol=crlf`：仓库里存的是 LF，克隆或 `npm pack` 之后变成 CRLF，同样内容的 `check.ps1` 会从 13,564 字节变 13,877（+313），`verify.ps1` 从 22,982 变 23,437（+455）。这两个文件若参与字节校验，**每一个克隆用户都会误报「版本不符」**。注意改用 SHA256 也救不了——换行符一变 SHA 同样对不上。所以真正参与字节比对的只有 8 个文件。
+
+**`check.ps1` 是安装前脚本，装完再跑它会返回 exit 1。** 它第 4 项专门查 `package.json` 里有没有黑猪包名，装好之后必然命中，于是给出 WARN + `NEEDS-CLEANUP`（exit 1）。这是设计如此，不是装坏了、也不是要你去清理。装后验证请用 `verify.ps1`。
+
+**`verify.ps1` 的 exit 2 是真的会发生的**：找不到 `dsh.cmd`，或 `profiles\<名>` 目录不存在，这两条是硬停（`-Hard`），直接返回 2，不会继续往下核对。exit 0 = 可直接使用（`FAIL 0 / WARN 0`），exit 1 = 有缺件或有冲突（任一 FAIL 或 WARN 都算）。
 
 手工确认也可以：
 
@@ -132,7 +140,7 @@ preset id 固定是 `blackpigmodel`，不能两个 bundle 各声明一次。会�
 
 ## 文件说明
 
-11 个文件，一句话一个：
+11 个条目，一句话一个（其中三个不参与字节校验，见下）：
 
 | 文件 | 作用 |
 | --- | --- |
@@ -143,12 +151,14 @@ preset id 固定是 `blackpigmodel`，不能两个 bundle 各声明一次。会�
 | `file-info.mjs` | `file_info`：只 stat 不读内容，给类型 / 存在性 / 字节数，一次调用可覆盖一组路径 |
 | `member-persona.mjs` | 子会话人格覆盖：把「你不能动手」换回干活的人格，按 agent scope 注册、只覆盖继承本 preset 的子会话 |
 | `package.json` | `dsh.bundle.patch` 声明 + `"exports": { "./*": "./*" }` 子路径映射 |
-| `README.md` | 本文件 |
-| `check.ps1` | 装前只读检查（7 项），发现同名声明时 exit 1 并报行号 |
-| `verify.ps1` | 装后生效验证（5 项），核对文件字节、`bundles` 登记、`dump-config` 退出码；**脚本内置的期望字节表就是各文件的权威尺寸**（`README.md` 允许编辑，不参与字节校验） |
+| `README.md` | 本文件（不参与字节校验） |
+| `check.ps1` | **装前**只读检查（7 项），发现同名声明时报行号并 exit 1。装完之后再跑它必然因「已含包名」报 WARN → exit 1，属设计行为（不参与字节校验） |
+| `verify.ps1` | **装后**生效验证（5 项），核对文件字节、`bundles` 登记、`dump-config` 退出码；**脚本内置的期望字节表就是权威尺寸**，其中 8 个参与比对，`README.md` / `check.ps1` / `verify.ps1` 三个 SKIP（不参与字节校验） |
 | `LICENSE` | MIT 许可证全文 |
 
-逐文件字节数不写在这张表里：包内的 `verify.ps1` 有一份内置期望值表，才是权威来源，本表抄一份只会过期（`README.md` 自己一改，尺寸就变了，所以它不参与字节校验）。要核对就运行 `verify.ps1`，第 1 项会逐个打印实际字节与期望字节的差值。
+逐文件字节数不写在这张表里：包内的 `verify.ps1` 有一份内置期望值表，才是权威来源，本表抄一份只会过期。要核对就运行 `verify.ps1`，第 1 项会逐个打印实际字节与期望字节的差值。
+
+三个 `[SKIP]` 的理由：`README.md` 随文档改动而变；`check.ps1` / `verify.ps1` 受 `.gitattributes` 的 `*.ps1 text eol=crlf` 影响，入库 LF、克隆/打包后变 CRLF（+313 / +455 字节），参与校验会让每个克隆用户误报版本不符。
 
 两点容易踩：
 
@@ -201,9 +211,11 @@ preset id 固定是 `blackpigmodel`，不能两个 bundle 各声明一次。会�
 
 这套东西不是凭空造的，主要参考了两处。
 
-**一是 DSH 自带的 `multitask` 模式。** 要说清楚：**万分感谢它。** 它让我第一次看到"一个模式可以是一整个 bundle"这件事该怎么做——自己的 `cordis.patch.yml`、自己的 preset 声明、自己的协调者工具收窄，这套骨架就是从它身上学的。安装方式（`dsh plugin add` 一条命令、不碰用户自己的配置）也是照它的路子。
+**一是第三方插件 `dsh-multitask@1.2.25`（社区包，GitHub 仓库 `https://github.com/Senguk520/dsh-multitask`，从 GitHub 安装，DSH 并不自带它）。** 要说清楚：**万分感谢它。** 它让我第一次看到"一个模式可以是一整个 bundle"这件事该怎么做——自己的 `cordis.patch.yml`、自己的 preset 声明、自己的协调者工具收窄，这套骨架就是从它身上学的。安装方式（`dsh plugin add` 一条命令、不碰用户自己的配置）也是照它的路子。
 
-学完之后我发现一件事：`multitask` 的协调者保留了 `read` / `grep` / `glob`。我照着用了一段时间，上下文还是被文件内容吃掉。所以这一版把读的工具整个摘掉，只留「查文件类型/是否存在/字节数」和「看图」两类验证。**这不是说它做得不对——它的取舍是对的，只是我要的比它更极端。**
+需要说清：它不是 DSH 内置模式，而是独立的 npm 包 `dsh-multitask`，靠 profile 的 `dependencies` 与 `dsh.profile.bundles` 引入；本包里提到的版本是 `1.2.25`，其他版本的行为可能不同。
+
+学完之后我发现一件事：`dsh-multitask@1.2.25` 的协调者保留了 `read` / `grep` / `glob`（这一条在 1.2.25 上实测成立）。我照着用了一段时间，上下文还是被文件内容吃掉。所以这一版把读的工具整个摘掉，只留「查文件类型/是否存在/字节数」和「看图」两类验证。**这不是说它做得不对——它的取舍是对的，只是我要的比它更极端。**
 
 **二是 DSH 的官方文档与代码。** 下列内容是照官方口径写的，不是猜的：
 
@@ -240,7 +252,7 @@ How that became this code: reading files eats context, so reading was handed to 
 
 Windows-first, DSH-only, requires the desktop CLI (`dsh.cmd`); no restart is normally needed (HMR recomposes the profile when `dsh.profile.bundles` changes) — restart only if HMR is off or the mode does not appear. MIT licensed.
 
-Built with heavy reference to DSH's bundled `multitask` preset (with thanks) and to the official DSH docs on agent presets and bundles. The author is a film director, not a programmer; this exists because a clean context was needed for real production work and nothing off-the-shelf fit.
+Built with heavy reference to **`dsh-multitask@1.2.25`**, a **third-party community plugin** (`https://github.com/Senguk520/dsh-multitask`) installed from GitHub — it is **not** bundled with DSH (with thanks), and to the official DSH docs on agent presets and bundles. The author is a film director, not a programmer; this exists because a clean context was needed for real production work and nothing off-the-shelf fit.
 
 ---
 

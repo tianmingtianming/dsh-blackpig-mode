@@ -26,6 +26,7 @@ desktop.ini
 # ── 本地备份（check.ps1 / verify.ps1 自己也会在 %TEMP% 下建影子 profile）──
 *.bak
 *.bak-*
+*.bak*
 *.orig
 *.rej
 bp-verify-shadow-*/
