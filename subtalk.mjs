@@ -1,0 +1,713 @@
+/**
+ * blackpig-subtalk — 让黑猪模式的大脑能跟**一次性代理**继续说话（包括中途纠错）。
+ *
+ * ── 它解决什么问题 ────────────────────────────────────────────────────────────
+ *
+ * 黑猪模式保留了两条委派路径：
+ *   · `subagent` / `subagent_fork` —— 一次性小弟（干完即散）
+ *   · `spawn_teammate` 等 —— 常驻队友
+ *
+ * 宿主的 `dsh-tool-subagent` 本身支持「对直系可续代理继续说话、甚至在它让出后唤醒」，
+ * 协议就是 `ctx.subagents.sendMessage(sender, childId, content, { signal })`。
+ * 但**脑子上拿不到那个工具**：
+ *
+ *   `dsh-tool-subagent-control` 把 `send_message` 注册在**全局层**（`ctx.tools.register`），
+ *   而 `dsh-tool-agent-team` 把同名的 `send_message` 注册在每个 agent **自己的层**上
+ *   （`scoped.tools.register`）。宿主 `view()` 的规则是先算继承层（受 restriction 过滤）、
+ *   **再用本层无条件覆盖 `visible`** —— 于是团队版（参数 `target`）盖掉了代理版
+ *   （参数 `agent_id`）。
+ *
+ * 实测（2026-10-30，运行时探针）：黑猪模式下大脑拿到的
+ * `send_message` 参数是 `["target","message"]`，`interrupt_agent` 参数是 `["target"]`
+ * —— 都是团队版，无法指定代理 id。
+ *
+ * 本模块注册一个**不同名字**的工具，直接调代理的 `sendMessage`，绕开撞名。
+ * 它**不改变任何现有工具**，是纯增量。
+ *
+ * ── 为什么不给代理版 send_message 改个名再装 ────────────────────────────────
+ *
+ * `tool-subagent-control` 的 Config **没有** `toolName` 字段（`tool-subagent` 有，
+ * 它没有）。所以无法通过配置把它注册成别的名字 —— 只能自己封一层。
+ *
+ * ── 设计 1：发送前先中断（interrupt-before-send）──────────────────────────────
+ *
+ * 宿主的投递语义是 `steer`（**最近的步骤边界**投递）。而「一步」可以是整个长工具调用
+ * （跑一次构建、扫一棵目录树）。于是纯发送会出现这个失效：
+ *
+ *     代理正按错误要求往下做 → 脑子发纠错 → 纠错排在队里
+ *     → 错误要求继续跑完 → 纠错才被读到 → 错误已经造成
+ *
+ * 纠错的价值全在**时效**。所以本模块在发送前先请求 `interrupt(目标, 凭据)`：
+ *
+ *   · 只停**当前轮次**，收件箱（`keepInbox`）与它派出的后代都不动；
+ *   · 对**已结束 / 不存在**的目标是 Host 既定的**静默空操作**，不抛错、不改状态；
+ *   · 已经 append 到会话日志的事实全部保留 —— 丢掉的只有「正在进行的那一个动作」。
+ *
+ * ⚠️ 但这只是**请求**，不是回执。宿主 `interrupt()` 返回 `void`，并且对非 resident
+ * 目标直接 `return`；本模块因此**永不**输出「已中断 / 已停止」这种断言，只输出
+ * `interruptRequested` + `interruptVerified: false`。把它当回执就是「假装成功」。
+ *
+ * ⚠️ 时序（宿主 `dsh-agent-loop` 的 `send()`）：`wakingAfterAbort = wakeup &&
+ * phase.kind !== 'idle' && phase.abort.signal.aborted` 为真时，投递目标从
+ * `next-step` 改道 `next-turn`。所以「刚被中断、紧接着的那条 steer」会落到**下一轮**，
+ * 不是最近的步骤边界。竞态本身不丢消息（收件箱保住），不必消除，但**话必须说对**：
+ * 工具描述与返回文案都写「这条会在它下一轮开始时处理」。
+ *
+ * ⚠️ 为什么是独立工具而不是「挂到 send_message 前面」：可靠性。
+ * 模型在赶进度时不会去分辨「这次是追加还是纠错」，所以中断必须内建进工具本身，
+ * 而不是靠调用方记得多传一个参数。措辞上也不承诺「立即生效」（见上文时序说明）。
+ *
+ * ── 借鉴 2：失败取向 ─────────────────────────────────────────────────────────
+ *
+ * 中断失败（服务缺失、目标不是自己的后代、id 读不出来）**绝不能**影响发送本身 ——
+ * 那会把「纠错稍晚」变成「纠错根本没发出去」，方向正好反了。所以中断的任何失败都只
+ * 记一条 info，然后照常发送。而**发送失败必须响亮**：把原因原样抛回去，让脑子能改派，
+ * 而不是对着一个空 id 发呆。
+ *
+ * ── 只在「脑子 → 代理」方向拦截 ─────────────────────────────────────────────
+ *
+ * 硬前置：调用方**不能**是被委派的代理。子会话 scope 上这两个工具**根本不注册**
+ * （B7：`subagent_fork` 未配 `agentPreset`，子会话继承黑猪 preset 会看到它们）；
+ * 万一隐藏失败，execute 也会返回**结构化拒绝**而不是抛错，否则 worker 停掉的就是
+ * 它自己的父会话，用户正在看的回答会被掐断。
+ *
+ * @module blackpig-subtalk
+ */
+
+export const name = 'blackpig-subtalk'
+
+/**
+ * 要注册工具，也要在调用那一刻能取到 `subagents` / `agents`。
+ *
+ * 只 inject `tools`：`subagents` 若在 apply 时就要求就绪，会把本行绑死在宿主服务的
+ * 就绪时机上；而本模块的取向是「取不到就安静退场、下次再试」。工具在、服务缺时
+ * 一次调用失败并报清楚原因，比整行显示 waiting 更有诊断价值。
+ */
+export const inject = ['tools']
+
+/** 工具名。必须与 guard 的保留集逐字一致（否则会被 guard 自己拦掉）。 */
+export const TOOL_NAME = 'send_to_subagent'
+
+/** 另一个工具名：只中断、不发送。 */
+export const INTERRUPT_TOOL_NAME = 'stop_subagent'
+
+/** 每次进程只警告一次的记录器。 */
+function warnOnceFactory(ctx) {
+  const seen = new Set()
+  return (message) => {
+    if (seen.has(message)) return
+    seen.add(message)
+    try {
+      ctx.logger?.warn?.(`blackpig-subtalk: ${message}`)
+    } catch {
+      // 日志通道不可用不能反过来炸掉会话。
+    }
+  }
+}
+
+/**
+ * 判断一个 agent 是不是被委派出来的子会话。
+ *
+ * 与 guard 里的同名函数保持同一判据（三信号任一成立）。
+ * 本模块在 preset 层注册工具（一次），但**子会话 scope 上会把它隐藏掉**（B7），
+ * 并且在队友误调时给结构化拒绝 —— 因为队友的 `send_message` 走团队通道，
+ * 不该被本模块接管。
+ */
+function isDelegatedChild(agent) {
+  const header = agent?.session?.header
+  if (header === undefined || header === null || typeof header !== 'object') return false
+  if (header.origin === 'subagent') return true
+  if (typeof header.parentSession === 'string' && header.parentSession !== '') return true
+  if (typeof header.delegationDepth === 'number' && header.delegationDepth > 0) return true
+  return false
+}
+
+/**
+ * 取 `subagents` 服务（调用那一刻才取）。
+ * @returns 服务或 undefined。
+ */
+function subagentsOf(ctx) {
+  try {
+    return ctx.get('subagents')
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * 目标代理此刻的可核对状态。
+ *
+ * `running` / `idle` 来自**活 agent 注册表**（`ctx.agents.get(id)`，宿主
+ * `dsh-agent` 的公开读方法）；`finished` 来自**已落盘的子会话目录**
+ * （`subagents.listChildren(parent)`，宿主 `dsh-subagent` 的公开读方法）；
+ * `unknown` 表示两处都查不到 —— 可能是 id 写错，也可能会话已被清理。
+ *
+ * @typedef {'running' | 'idle' | 'finished' | 'unknown'} TargetState
+ */
+
+/** 一个目标的探查结果。`looked === false` 表示**两个来源都不可用**，即「没查成」。 */
+function targetRow(state, source, looked, extra) {
+  return { state, source, looked, ...(extra ?? {}) }
+}
+
+/**
+ * 读活 agent 注册表。
+ *
+ * 宿主 API 是 `agents.get(id)`（`dsh-agent` 的 `agents` service），**没有**
+ * `subagents.get(id)`、也没有 `.stop()` —— 所以「目标在不在」只能从这两条公开
+ * 读路径判定，本模块不去猜内部字段（`resident` 是管理器私有 Map）。
+ *
+ * @param ctx - 插件上下文。
+ * @param id - 会话 id。
+ * @returns `{ kind: 'live' | 'absent' | 'unavailable', agent? }`。
+ */
+function liveAgentOf(ctx, id) {
+  let agents
+  try {
+    agents = ctx.get('agents')
+  } catch {
+    agents = undefined
+  }
+  if (agents === undefined || agents === null || typeof agents.get !== 'function') {
+    return { kind: 'unavailable' }
+  }
+  try {
+    const agent = agents.get(id)
+    if (agent === undefined || agent === null) return { kind: 'absent' }
+    return { kind: 'live', agent }
+  } catch {
+    return { kind: 'unavailable' }
+  }
+}
+
+/**
+ * 调用方（父）自己的会话 id 候选。
+ *
+ * 宿主的 agent id 与会话 id 一般同名，但根会话在目录里出现过 `session-<uuid>`
+ * 的形式，所以**两种写法都试**，不假定只有一种。去重后按顺序返回。
+ *
+ * @param sender - 调用方 agent。
+ * @returns 非空字符串 id 的数组（可能为空）。
+ */
+function parentSessionIdsOf(sender) {
+  const candidates = new Set()
+  for (const candidate of [sender?.session?.id, sender?.session?.header?.id, sender?.id]) {
+    if (typeof candidate === 'string' && candidate !== '') candidates.add(candidate)
+  }
+  return [...candidates]
+}
+
+/**
+ * 问「这个 id 是不是我派出过的子会话」——查已落盘的子会话目录。
+ *
+ * 只用来区分「已结束 / 早先派过」（目录里有）与「根本不是我的子会话」（两边都没有）。
+ * 服务不在、或该 composition 没装 `sessionQuery` 投影时返回 `'unavailable'`，
+ * **绝不当成「存在」**。
+ *
+ * @param sub - subagents 服务。
+ * @param parentSessionIds - 调用方（父）会话 id 候选。
+ * @param targetId - 被查的 id。
+ * @param signal - 调用方取消信号。
+ * @returns `'present' | 'absent' | 'unavailable'`。
+ */
+async function catalogHas(sub, parentSessionIds, targetId, signal) {
+  if (sub === undefined || sub === null || typeof sub.listChildren !== 'function') return 'unavailable'
+  if (!Array.isArray(parentSessionIds) || parentSessionIds.length === 0) return 'unavailable'
+  let answered = false
+  for (const parentSessionId of parentSessionIds) {
+    try {
+      const rows = await sub.listChildren(parentSessionId, signal)
+      if (!Array.isArray(rows)) continue
+      answered = true
+      if (rows.some((row) => row?.id === targetId)) return 'present'
+    } catch {
+      // 换个候选 id 再试；全都不行才算 unavailable。
+    }
+  }
+  return answered ? 'absent' : 'unavailable'
+}
+
+/**
+ * 判定目标此刻的状态，并说明**凭据是什么、什么没查到**。
+ *
+ * @param ctx - 插件上下文。
+ * @param sub - subagents 服务。
+ * @param sender - 调用方 agent。
+ * @param targetId - 目标 id。
+ * @param signal - 调用方取消信号。
+ * @returns `{ state, source, looked }`。
+ */
+async function describeTarget(ctx, sub, sender, targetId, signal) {
+  const live = liveAgentOf(ctx, targetId)
+
+  if (live.kind === 'live') {
+    let status
+    try {
+      status = live.agent?.status
+    } catch {
+      status = undefined
+    }
+    return targetRow(status === 'running' ? 'running' : 'idle', 'agents.get()', true)
+  }
+
+  const catalog = await catalogHas(sub, parentSessionIdsOf(sender), targetId, signal)
+  if (catalog === 'present') {
+    // 目录里有、活注册表里没有 → 这个子会话确实派出去过，但此刻不再活着。
+    return targetRow('finished', 'subagents.listChildren()', true)
+  }
+  if (live.kind === 'absent') {
+    // 活注册表可用且明确说「没有」：活着的代理不可能缺席于注册表。
+    return targetRow('unknown', catalog === 'absent' ? 'agents.get()+listChildren()' : 'agents.get()', true, {
+      catalogUnavailable: catalog === 'unavailable',
+    })
+  }
+  // 两个来源都取不到 —— 老实说没查成，不假装查过。
+  return targetRow('unknown', 'none', false)
+}
+
+/**
+ * 发出一次中断请求。
+ *
+ * ⚠️ 宿主的 `interrupt(targetSessionId, authority)` **没有返回值**，文档原话是
+ * `Fire-and-return: the cancel signal is issued before this returns, but the target
+ * may keep running until it observes the signal`。所以这里只能如实回答
+ * **「请求已发出」**，不能回答「已停止」—— 本函数因此返回 `{ requested, reason }`，
+ * 并且调用方必须以 `verified: false` 对外呈现。
+ *
+ * 另外：宿主对**不存在 / 非 resident 的目标是静默 no-op**
+ * （`const activation = this.resident.get(targetSessionId); if (activation === void 0) return;`），
+ * 所以「没抛异常」不足以证明任何事 —— 这正是本模块不再输出 `interrupted=true` 的原因。
+ *
+ * **静默降级**：中断失败不影响发送（那会把「纠错稍晚」变成「纠错没发出去」）。
+ *
+ * @param sub - subagents 服务（已确认有 interrupt）。
+ * @param ctx - 插件上下文（日志用）。
+ * @param sender - 调用方 agent（必须是目标的精确活祖先）。
+ * @param childId - 目标代理 id。
+ * @returns `{ requested: boolean, reason?: string }`。
+ */
+function requestInterrupt(sub, ctx, sender, childId) {
+  try {
+    // 宿主签名只有两个参数：interrupt(targetSessionId, authority)。
+    sub.interrupt(childId, { kind: 'ancestor', agent: sender })
+    return { requested: true }
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error)
+    try {
+      ctx.logger?.info?.(`blackpig-subtalk: the interrupt request was rejected (${detail}); the message is still delivered`)
+    } catch {
+      // 日志通道不可用不能反过来炸掉会话。
+    }
+    return { requested: false, reason: `the host rejected the interrupt request: ${detail}` }
+  }
+}
+
+/**
+ * 注册两个工具。
+ *
+ * @param ctx - preset scope 的插件上下文。
+ * @param config - `{ enabled, interruptBeforeSend }`。
+ */
+export function apply(ctx, config) {
+  if (config?.enabled === false) return
+
+  const interruptBeforeSend = config?.interruptBeforeSend !== false
+  const warn = warnOnceFactory(ctx)
+
+  /**
+   * 子会话 scope 上这两个工具的隐藏 disposer。
+   *
+   * B7：`subagent_fork` 没配 `agentPreset`，子会话走 `composeFrom` 继承黑猪 preset，
+   * 于是子会话的工具表里也出现这两个工具，一调用就撞 coordinator-only 闸门 —— 白烧一步。
+   * 最干净的做法是**不要把工具给队友**。注册发生在 preset 层（一次），而隐藏是
+   * **按 agent scope** 做的（`agent.ctx.tools.restrict({ deny })`），这正是 guard
+   * 自己用的同一机制：restriction 过滤的是「继承来的」工具面，preset 层在子会话的祖先
+   * 链上，所以只有该队友看不见，协调者不受影响。
+   *
+   * 失败取向：restrict 不可用 / 名字不可收紧时**只记一条 info**，回落到底下的
+   * 结构化拒绝 —— 让队友「看得见但调不动、且有可读原因」，好过静默地什么都不做。
+   */
+  // ⚠️ 2026-11-02 改（简化审计发现 17）：原来是 `WeakMap<agent, disposer>`，
+  // 注释说「保留 disposer 以防重装」。但实测量：`.get` 读取 **0 次** ——
+  // 没有任何路径调用那个 disposer。而 WeakMap 的 key 是 agent，agent 释放时
+  // 条目自动消失 → 那个 disposer **永远不会被调用**。所谓「保留」是不可达承诺。
+  //
+  // 实际行为本来就是这样：restrict 的 disposer 由 `agent.ctx` 的 effect 生命周期管理
+  // （被委派 agent 释放时自动卸），不需要我们持有。所以改成 WeakSet —— 只记
+  // 「这个 agent 处理过」，语义与 `.has` 完全等价，但不再存死引用。
+  const memberHides = new WeakSet()
+
+  /**
+   * 记「这个 agent 的隐藏已经处理过」——成功、失败、或该 scope 根本没有 restrict。
+   *
+   * ⚠️ 失败也必须记账，否则每次 `agent/created` 都会重试并重复报警；而失败路径
+   * 本来就有 execute 里的结构化拒绝兜底，不会漏。
+   */
+  const hideFromMember = (agent) => {
+    if (memberHides.has(agent)) return
+    const tools = agent?.ctx?.tools
+    if (tools === undefined || typeof tools.restrict !== 'function') {
+      // 这个 scope 没有 restrict —— 只记一次 info，不报警（不是错误，是 composition 差异）。
+      memberHides.add(agent)
+      try {
+        ctx.logger?.info?.(
+          `blackpig-subtalk: a delegated child scope exposes no tools.restrict(); ${TOOL_NAME}/${INTERRUPT_TOOL_NAME} stay visible there and refuse with a reason when called`,
+        )
+      } catch {
+        // 日志通道不可用不能反过来炸掉会话。
+      }
+      return
+    }
+    try {
+      tools.restrict({ deny: [TOOL_NAME, INTERRUPT_TOOL_NAME] })
+      // disposer 由 agent.ctx 的 effect 生命周期管理（agent 释放时自动卸），
+      // 本模块不需要持有它 —— 见上面 memberHides 的注释。
+      memberHides.add(agent)
+    } catch (error) {
+      // 记账（见上），否则同一 agent 会反复重试、反复报警。
+      memberHides.add(agent)
+      warn(
+        `hiding ${TOOL_NAME}/${INTERRUPT_TOOL_NAME} from a delegated child failed (${error instanceof Error ? error.message : String(error)}); that member still sees them but they refuse with a reason`,
+      )
+    }
+  }
+
+  // 工具 1：send_to_subagent
+  try {
+    ctx.tools.register({
+      name: TOOL_NAME,
+      description:
+        'Send a follow-up message to a worker you delegated in this mode with `subagent_preset`. ' +
+        'Use the `childSessionId` that delegation returned as `agent_id`. ' +
+        'COORDINATOR-ONLY: a delegated child cannot use this. ' +
+        'WHAT THE RETURN VALUE PROVES: `messageId` is the host\'s admission receipt — the message is in the ' +
+        'child\'s inbox. Nothing here proves the child has STOPPED or READ it. ' +
+        'With `interrupt=true` a cancel request is also handed to the host; the host exposes no receipt for that, ' +
+        'so the result says `interruptRequested=true` and `interruptVerified=false`. Treat it as a request, not as ' +
+        'confirmation the child stopped. ' +
+        'TIMING: if the child is running when it is interrupted, the host delivers this message at the child\'s ' +
+        'NEXT TURN, not at the nearest step boundary — so the action already in flight may still complete before ' +
+        'your correction is read. Never assume the correction landed ahead of that action. ' +
+        'Team members are NOT addressed here; use `send_message` for those.',
+      parameters: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          agent_id: {
+            type: 'string',
+            description: 'The `childSessionId` returned by `subagent_preset` when you delegated this worker.',
+          },
+          message: {
+            type: 'string',
+            description: 'The follow-up instruction or correction to deliver.',
+          },
+          interrupt: {
+            type: 'boolean',
+            description:
+              'Default true. When true a cancel request is sent to the child before the message, so a CORRECTION ' +
+              'is not stuck behind the long tool call it is currently running. The host gives no receipt: the child ' +
+              'stops at its next observation of the signal, and a message sent while it is being interrupted is ' +
+              'processed when its NEXT TURN starts. Pass false to ADD information while its current direction is ' +
+              'still correct — then nothing is cancelled and the message is read at the next step boundary.',
+          },
+        },
+        required: ['agent_id', 'message'],
+      },
+      output: {
+        schema: {
+          type: 'object',
+          additionalProperties: false,
+          properties: {
+            ok: { type: 'boolean' },
+            messageId: { type: 'string' },
+            refused: { type: 'boolean' },
+            reason: { type: 'string' },
+            interruptRequested: { type: 'boolean' },
+            interruptVerified: { type: 'boolean' },
+            targetState: { type: 'string', enum: ['running', 'idle', 'finished', 'unknown'] },
+          },
+          required: ['ok', 'refused', 'reason', 'interruptRequested', 'interruptVerified', 'targetState'],
+        },
+        // ⚠️ 字段必须**显式摊平进文本**。模型只看得见 render 的输出，读不到裸字段
+        // （2026-10-30 端到端验收里模型明确报告「interrupted 字段不存在」）。
+        // 同理，这里**不能**出现 `interruptVerified=true` 的字样 —— 宿主不给回执，
+        // 那个值永远是 false，文案必须与它一致，否则又是一个「假装成功」。
+        render: (args, value) => [
+          {
+            type: 'text',
+            text: value?.refused === true
+              ? `send_to_subagent did NOT deliver anything to ${args.agent_id} | refused=true | reason=${value?.reason ?? '?'}`
+              : `message accepted into the inbox of subagent ${args.agent_id}` +
+                ` | messageId=${String((value && value.messageId) ?? '?')}` +
+                ` | targetState=${value?.targetState ?? 'unknown'}` +
+                ` | interruptRequested=${value?.interruptRequested === true ? 'true' : 'false'}` +
+                ` | interruptVerified=false (the host issues no interrupt receipt)` +
+                (value?.interruptRequested === true && value?.targetState === 'running'
+                  ? ' | NOTE: because the child was running, this message is processed when its NEXT TURN starts — the action in flight may still finish first'
+                  : '') +
+                (typeof value?.reason === 'string' && value.reason !== '' ? ` | note=${value.reason}` : ''),
+          },
+        ],
+      },
+      async execute(args, exec) {
+        const sender = exec?.agent
+        if (sender === undefined || sender === null) {
+          throw new Error('send_to_subagent requires a calling agent (exec.agent was undefined)')
+        }
+        const sub = subagentsOf(ctx)
+
+        // 硬前置：代理不能用这个工具（否则它会去停自己的父会话）。
+        // 结构化拒绝而不是抛错 —— 抛错只会让队友以为工具坏了并重试。
+        if (isDelegatedChild(sender)) {
+          return {
+            ok: false,
+            messageId: '',
+            refused: true,
+            reason:
+              'send_to_subagent is coordinator-only: a delegated child must reply through its own report, or use ' +
+              '`send_message` to reach its parent. Nothing was sent and no interrupt was issued.',
+            interruptRequested: false,
+            interruptVerified: false,
+            targetState: 'unknown',
+          }
+        }
+        if (sub === undefined || typeof sub.sendMessage !== 'function') {
+          throw new Error('send_to_subagent requires the subagents service, which is not available in this composition')
+        }
+
+        // 逐次可覆盖默认取向：
+        //   · 默认（或显式 true）：**先请求中断再发送**。用于**纠错** —— 代理正按错误
+        //     要求跑一个长工具调用，不打断它就会先跑完错的再读你的话。
+        //   · 显式 false：**只投递、不打断**。用于**追加信息**（补一条路径、加一个约束）
+        //     而当前工作方向是对的 —— 这时打断只会白丢一个正在进行的动作。
+        const shouldInterrupt = args.interrupt === undefined
+          ? interruptBeforeSend
+          : args.interrupt === true
+
+        // 先看清目标此刻是什么状态 —— 这既决定「要不要发中断」，也是返回值里唯一
+        // 能被称为「观察」的东西（中断本身没有回执）。
+        const target = await describeTarget(ctx, sub, sender, args.agent_id, exec?.signal)
+
+        let interruptRequested = false
+        let interruptReason = ''
+        if (shouldInterrupt) {
+          if (target.state === 'unknown' && target.looked) {
+            // 宿主对不存在的目标是静默 no-op；再发一次中断只会制造「我打断了」的错觉。
+            interruptReason = 'the target was not found, so no interrupt was attempted'
+          } else if (target.state === 'unknown') {
+            interruptReason = 'the target could not be checked, so no interrupt was attempted'
+          } else if (target.state === 'finished') {
+            // 已结束的目标不在 resident 表里，宿主的 interrupt 对它**保证**是空操作。
+            // 发了也白发，而且会让调用方以为「打断过」—— 干脆不发，把话说清。
+            interruptReason =
+              'the target has already ended (absent from the live registry), so no interrupt was attempted; ' +
+              'the host would treat one as a no-op. The message itself may still cold-resume it.'
+          } else {
+            const outcome = requestInterrupt(sub, ctx, sender, args.agent_id)
+            interruptRequested = outcome.requested
+            if (!outcome.requested) interruptReason = outcome.reason ?? 'the host rejected the interrupt request'
+          }
+        }
+
+        const content = [{ type: 'text', text: args.message }]
+        // 发送失败必须响亮：让调用方拿到原因，能改派。
+        const messageId = await sub.sendMessage(sender, args.agent_id, content, { signal: exec.signal })
+        return {
+          ok: true,
+          messageId: String(messageId),
+          refused: false,
+          reason: interruptReason,
+          interruptRequested,
+          // 宿主 `interrupt()` 没有返回值、对不存在目标是静默 no-op —— 永远无法验证。
+          interruptVerified: false,
+          targetState: target.state,
+        }
+      },
+    })
+  } catch (error) {
+    warn(
+      `registering ${TOOL_NAME} failed: ${error instanceof Error ? error.message : String(error)} — the coordinator will not be able to follow up a one-shot child`,
+    )
+  }
+
+  // 工具 2：stop_subagent（只停，不问）
+  try {
+    ctx.tools.register({
+      name: INTERRUPT_TOOL_NAME,
+      description:
+        'Stop the current turn of a worker you delegated in this mode with `subagent_preset`, keeping its ' +
+        'inbox and any descendants intact. COORDINATOR-ONLY: a delegated child cannot use this. ' +
+        'WHAT THIS CANNOT DO: confirm the stop. The host issues a cancel request and returns nothing, and an ' +
+        'interrupt of an unknown or already-ended target is a documented silent no-op — which is why this tool ' +
+        'reports `stopRequested` and `verified=false` instead of claiming the child stopped. ' +
+        'It checks whether the target exists first and refuses instead of faking success. ' +
+        'Normally you do not need this: `send_to_subagent` requests an interrupt before it delivers. ' +
+        'Use it when you want the child to stop WITHOUT sending it anything.',
+      parameters: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          agent_id: {
+            type: 'string',
+            description: 'The `childSessionId` returned by `subagent_preset` when you delegated this worker.',
+          },
+        },
+        required: ['agent_id'],
+      },
+      output: {
+        schema: {
+          type: 'object',
+          additionalProperties: false,
+          properties: {
+            targetState: { type: 'string', enum: ['running', 'idle', 'finished', 'unknown'] },
+            stopRequested: { type: 'boolean' },
+            verified: { type: 'boolean' },
+            outcome: {
+              type: 'string',
+              enum: [
+                'request-sent-unverified',
+                'target-not-found',
+                'target-not-checkable',
+                'rejected-by-host',
+                'coordinator-only',
+              ],
+            },
+            detail: { type: 'string' },
+          },
+          required: ['targetState', 'stopRequested', 'verified', 'outcome', 'detail'],
+        },
+        // B1：`stopped === true ? 'sent' : 'no-op'` 让 no-op 分支永远不可达 ——
+        // 旧实现无条件返回 `{ stopped: true }`，于是渲染永远是 "sent"。
+        // 现在渲染只陈述**结果分类**，不再暗示「已停止」。
+        render: (args, value) => [
+          {
+            type: 'text',
+            text:
+              `stop_subagent ${args.agent_id}` +
+              ` | outcome=${value?.outcome ?? '?'}` +
+              ` | stopRequested=${value?.stopRequested === true ? 'true' : 'false'}` +
+              ` | verified=${value?.verified === true ? 'true' : 'false'}` +
+              ` | targetState=${value?.targetState ?? 'unknown'}` +
+              (typeof value?.detail === 'string' && value.detail !== '' ? ` | ${value.detail}` : ''),
+          },
+        ],
+      },
+      async execute(args, exec) {
+        const sender = exec?.agent
+        if (sender === undefined || sender === null) {
+          throw new Error('stop_subagent requires a calling agent (exec.agent was undefined)')
+        }
+        if (isDelegatedChild(sender)) {
+          return {
+            targetState: 'unknown',
+            stopRequested: false,
+            verified: false,
+            outcome: 'coordinator-only',
+            detail:
+              'stop_subagent is coordinator-only: a delegated child cannot stop other agents or its own parent. ' +
+              'Nothing was stopped and no interrupt was issued.',
+          }
+        }
+        const sub = subagentsOf(ctx)
+        if (sub === undefined || typeof sub.interrupt !== 'function') {
+          throw new Error('stop_subagent requires the subagents service, which is not available in this composition')
+        }
+
+        // B1 的核心：**先确认目标存在**，再动手。旧实现直接转发给宿主的
+        // interrupt()，而宿主对不存在 / 已结束的目标是静默 no-op，于是「没抛异常」
+        // 被当成了「停掉了」。
+        const target = await describeTarget(ctx, sub, sender, args.agent_id, exec?.signal)
+
+        if (target.state === 'unknown') {
+          const looked = target.looked === true
+          // 两个来源都不可用 → 老实说「没查成」，不冒充「不存在」，也不冒充「已停止」。
+          const catalogMachineReadable = target.catalogUnavailable !== true
+          return {
+            targetState: 'unknown',
+            stopRequested: false,
+            verified: false,
+            outcome: looked ? 'target-not-found' : 'target-not-checkable',
+            detail: !looked
+              ? 'neither the live agent registry (agents.get) nor the child catalog (subagents.listChildren) ' +
+                'could be read, so this tool cannot tell whether the target exists — no interrupt was issued ' +
+                'and the outcome is unknown, NOT a success'
+              : catalogMachineReadable
+                ? `no live agent has the id "${args.agent_id}" and it is not in your durable child catalog ` +
+                  `(looked via ${target.source}), so there is nothing to stop — no interrupt was issued`
+                : `no live agent has the id "${args.agent_id}" (looked via ${target.source}); the durable child ` +
+                  'catalog could not be read, so this cannot rule out an earlier child with that id — but no live ' +
+                  'target exists, so no interrupt was issued',
+          }
+        }
+
+        // 已结束的目标不在 resident 表里 —— 宿主对它的 interrupt **保证**是静默
+        // no-op（`if (activation === void 0) return;`）。所以先判，再决定要不要发。
+        // 发了也白发，还会让调用方以为某件事发生了。
+        if (target.state === 'finished') {
+          return {
+            targetState: 'finished',
+            stopRequested: false,
+            verified: false,
+            outcome: 'target-not-found',
+            detail:
+              'this subagent already ended (it is in your durable child catalog but not in the live agent ' +
+              'registry), so there was nothing to stop; no interrupt was issued and nothing changed',
+          }
+        }
+
+        const outcome = requestInterrupt(sub, ctx, sender, args.agent_id)
+        if (!outcome.requested) {
+          return {
+            targetState: target.state,
+            stopRequested: false,
+            verified: false,
+            outcome: 'rejected-by-host',
+            detail: outcome.reason ?? 'the host rejected the interrupt request',
+          }
+        }
+        return {
+          targetState: target.state,
+          stopRequested: true,
+          // 宿主 `interrupt()` 返回 undefined，且对非 resident 目标静默 return。
+          verified: false,
+          outcome: 'request-sent-unverified',
+          detail:
+            'the cancel request was handed to the host; it issues no receipt, so whether the child has ' +
+            'observed the signal is unverified — this result is the only evidence you get. This worker is NOT a ' +
+            'Team member: `list_agents` and `wait_agent` never see it and report "no-active-peer" forever, so do ' +
+            'not confirm its state with them. Judge it from a `send_to_subagent` reply (`targetState`) or from the ' +
+            'host\'s completion notice.',
+        }
+      },
+    })
+  } catch (error) {
+    warn(
+      `registering ${INTERRUPT_TOOL_NAME} failed: ${error instanceof Error ? error.message : String(error)}`,
+    )
+  }
+
+  // B7：把这两个工具从**子会话**的可见面上摘掉（协调者不受影响）。
+  // 用 `agent/created` + agent 自己的 scope，理由见上面 `memberHides` 的注释。
+  try {
+    ctx.on('agent/created', ({ agent }) => {
+      if (agent === undefined || agent === null) return
+      if (!isDelegatedChild(agent)) return
+      hideFromMember(agent)
+    })
+    // 启动 / 恢复路径：本插件可能晚于已有 agent 装载，补一次。
+    try {
+      const agents = ctx.get('agents')
+      if (agents !== undefined && agents !== null && typeof agents.list === 'function') {
+        for (const agent of agents.list()) {
+          if (agent === undefined || agent === null) continue
+          if (!isDelegatedChild(agent)) continue
+          hideFromMember(agent)
+        }
+      }
+    } catch {
+      // 取不到不是致命错误。
+    }
+  } catch (error) {
+    warn(`subscribing to agent/created failed: ${error instanceof Error ? error.message : String(error)}`)
+  }
+}

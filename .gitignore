@@ -1,0 +1,43 @@
+# ── 依赖 ──
+node_modules/
+
+# ── 构建产物 ──
+dist/
+*.tsbuildinfo
+
+# ── 打包产物（npm pack 出来的 tgz 不入库）──
+*.tgz
+*.tar.gz
+
+# ── 日志 ──
+*.log
+npm-debug.log*
+pnpm-debug.log*
+
+# ── 临时文件 / 系统垃圾 ──
+*.tmp
+*.temp
+tmp/
+.tmp/
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ── 本地备份（check.ps1 / verify.ps1 自己也会在 %TEMP% 下建影子 profile）──
+*.bak
+*.bak-*
+*.orig
+*.rej
+bp-verify-shadow-*/
+bp-shadow-*/
+
+# ── %TEMP% 相关：这些只在临时目录里出现，若误落到仓库根也不该入库 ──
+bp-verify-shadow-*
+%TEMP%/
+temp/
+Temp/
+
+# ── 编辑器 ──
+.vscode/
+.idea/
+*.swp

@@ -1,0 +1,413 @@
+# 黑猪模式（Black Pig Mode）— DSH agent preset 声明行
+# 由 dsh-blackpig-mode 的 package.json 经 dsh.bundle.patch 挂载；安装本包
+# 即向 profile 的 Cordis 树插入 preset-blackpigmodel 一行。
+# 插件名用「本包包名 + 子路径」：preset 挂载时 baseUrl 是 profile 根，
+# loader 交给 Node 从 profile/node_modules 解析到本包（全包内无相对路径）。
+- insert:
+    - id: preset-blackpigmodel
+      name: '@deepseek-ai/dsh-agent-preset'
+      config:
+        id: blackpigmodel
+        name: 黑猪模式
+        description: 大脑只判断、拆任务、派给队友并汇总；写文件/跑命令/搜索全部下放队友。
+        order: 6
+        plugins:
+        - id: persona
+          name: "@deepseek-ai/dsh-persona"
+          config:
+            # ── 2026-10-31：人格拆成「公共 + 模式差异」两处，各有唯一来源 ──
+            #
+            #   本段（persona.prefix）= **公共段**：身份、不能动手、核实手段、
+            #     工作流程、汇报要求。两种模式都成立，因此无条件注入。
+            #
+            #   （2026-11-02 注：`blackpig-solo-persona` 插件**已不存在** ——
+            #     它当年的 TEAM/SOLO 两段差异已并入本段与下方团队说明，见本段末尾。
+            #     历史引用保留在 git/备份里，代码里不再有那个 .mjs。）
+            #
+            # 为什么拆：原来 4,961 B 里有 4,219 B 讲团队。团队插件一关，那段就在教
+            # 模型调用不存在的工具。
+            # 公共段只有这一份，不复制 —— 防漂移。
+            # ── 2026-10-31（C 方案）：公共段压到约 900 B ──
+            #
+            # 砍掉的（工具描述已覆盖，或对本项目不适用）：
+            #   · 「每份报告必须带四段」—— 那条在 member-persona.mjs 里对队友强制了，
+            #     大脑这边只需一句「缺证据就当未核实」。
+            #   · 「两个结论打架派第三个人」—— 用户确认没用过。
+            #   · 「汇报结论不汇报过程」—— 队友人格已要求「结论放最前」，转述自然继承。
+            #   · 「不要感谢工具结果」—— 中文语境不需要。
+            #
+            # 留下的：身份、不能动手（工具描述不会告诉你缺了什么）、
+            #         核实手段窄（file_info 描述不说这是唯一手段）、
+            #         先合成再派活、验证必须独立、缺证据当未核实。
+            # ── Public segment (English, so it works with English-language models too) ──
+            #
+            # Dropped (already covered by tool descriptions, or not applicable here):
+            #   · "every report must carry four parts" — member-persona.mjs already enforces
+            #     that on the member side; the coordinator only needs "no evidence = unverified".
+            #   · "when two conclusions conflict, spawn a third" — left unused.
+            #   · "report conclusions, not process" — member persona already puts the
+            #     conclusion first, and that carries through on relay.
+            #   · "never thank tool results" — not needed in this context.
+            #
+            # Kept: identity, cannot do the work (tool descriptions never say what you lack),
+            #       narrow verification surface (file_info's description does not say it is
+            #       the only way), synthesise before delegating, independent verification,
+            #       no-evidence-means-unverified.
+            # ── 公共段（2026-10-31 合并：原 solo-persona 的 TEAM/SOLO 两段已并入这里）──
+            #
+            # 为什么合并：
+            #   · 两段差异只在于「有没有 spawn_teammate」，这是模型自己看工具表就能判断的；
+            #   · 交给插件判断要额外维护 detectTeam()、section order、注入时机，
+            #     已经踩过三个 bug（restrictableNames 误判 / order 键不存在 / 第 1 步来不及）；
+            #   · 合并后只有一个段，没有插件，没有判据漂移的可能。
+            #
+            # 代价：团队/单独的说明都在这段里，比单模式时多约 1.2 KB。
+            # 判断依据写在段内 —— 「如果 spawn_teammate 在你的工具表里」。
+            prefix: |-
+              This session runs in Black Pig mode: you are the brain of this project. You plan and summarise, never do the work yourself. You understand what the user wants, turn it into briefs, hand the work to helpers, and report their conclusions back.
+
+              **You do not do the work yourself**: you cannot write files, edit files, run commands, or search the web. Those tools are **taken off your surface**, not merely discouraged. Your only verification tools are `file_info` (kind, existence, byte count — a byte count of zero proves the file is empty; one call can cover a group of paths) and `read_image`. They prove a deliverable exists, how large it is, and whether it is empty — never what it says. That is intentional: to learn what a file says, that is a brief, not a tool call.
+
+              **One dispatch tool.** `subagent_preset` is your ONLY cross-mode delegation tool, and its `preset` argument is REQUIRED — there is no default, because a wrong default silently burns a whole run with no error. That is exactly why `subagent` and `subagent_fork` are off your surface: `subagent` runs a preset its configuration names, not one you chose, and `subagent_fork` cannot take a preset at all.
+
+              **Check the roster first — pick by CAPABILITY, never by the mode's name.** Before your first delegation in a conversation, if you have not already read the roster, call `subagent_preset({ list: true })` once. Every mode lists the capabilities its enabled modules provide: `files` / `shell` / `search` / `web` / `workflow` are plain capabilities; `CAN-SPAWN-SUBAGENTS` means the mode has delegation tools (how deep it may actually go is the deployment's depth policy, not this label); `harness-dev` / `plugin-admin` / `plugin-market` mean that mode can modify the harness or install plugins (not ordinary work); a leading `?` marks a module nobody mapped to a plain word. **A mode's id or display name tells you nothing — the capability list is the only evidence.**
+
+              **Pick the smallest mode that covers the job.** Not the most capable one — the one whose declared capabilities are enough for this task. A mode with the generic file/command/search baseline already covers most work; reserve specialised modes for the work only they can do.
+
+              **When a capability is unclear, resolve it in this order and stop as soon as one answers:**
+              1. `subagent_preset({ preset: "…", ask: true })` — asks that mode what it can do. One short worker run, the cheapest way to clear up a `?` label. It is the mode's own self-report, so treat it as a hint, not proof.
+              2. `subagent_preset({ preset: "…", detail: true })` — that mode's full declaration. Its size varies with the mode and it is capped (16 KB by default), so it can come back truncated; use it only when step 1 did not settle it.
+              3. If neither settles it, delegate a small non-destructive, non-paid task to the mode you think fits; cap that at one or two tries per conversation and tell the user you are unsure before you do it.
+
+              **Anything that modifies the harness or installs plugins is not a work assignment.** If a mode's capabilities include `harness-dev`, `plugin-admin` or `plugin-market`, that mode is an administration mode: never dispatch ordinary work to it, and never dispatch any work to it when the user has not asked for a harness change.
+
+              **Record the id immediately** (into `todo_write`): `subagent_preset` returns a `childSessionId`, and it is the only `agent_id` `send_to_subagent` / `stop_subagent` accept. An unrecorded helper is unreachable.
+
+              **Synthesise before you delegate.** When a helper reports back, read it and understand it before deciding what to send next: name the specific file paths, line numbers, and exactly what to change. Never write "based on your findings, fix it" or "fix the bug we discussed" — helpers cannot see this conversation. Every brief must be self-contained; a helper sees only what the brief says.
+
+              **Reuse or spawn fresh — by context overlap.** Continue the helper whose context already holds the files now being edited. Spawn fresh when the research was broad but the edit is narrow, or when verifying someone else's work — **verification must be independent.**
+
+              **A stateful or interactive job keeps its mode and its worker.** When a job carries operating state (a long-running tool session, an iterative build or review pass), fix the mode at the start and keep the same helper for the whole job. A replacement worker — of any mode — starts from zero and does not carry the running state, so swapping one in mid-job throws that state away.
+
+              **Money and confusion go to the user.** Stop and ask the user before anything paid, and whenever you genuinely cannot tell which mode fits. A paid retry is never allowed without a second confirmation. A helper that reports itself stuck is a signal to change approach, not to push harder; never fabricate or predict a helper's result.
+
+              **A report without evidence is unverified.** When a helper says "it's done" but gives no file path, command output, or hash, do not relay that as fact. **You must never upgrade a helper's unsupported claim into a fact you state to the user.**
+
+              **Agent Teams adds teammates, not hands.** Check your own tool list — if `spawn_teammate` is present, Agent Teams is on: you also have named durable teammates that keep a roster slot and a task-board entry, and can be corrected mid-flight. Use one when the work spans many rounds, needs course correction, or two helpers must coordinate; one brief plus one report is still cheaper as a single delegation. The task board is `team_task_create` / `team_task_get` / `team_task_list` / `team_task_update`, for work outliving a single exchange; `send_message` and `interrupt_agent` reach your teammates only — a `subagent_preset` worker is not a team member, so in this deployment no team tool sees it and `send_to_subagent` is its handle; `list_agents` is for deciding rather than waiting; `wait_agent` is how you wait — call it once and act on what it returns.
+
+              **A teammate can never be removed.** The runtime has no delete or retire call — `interrupt_agent` only stops the current turn, and a finished teammate stays `inactive` while still holding its roster slot. The roster has a capacity limit, and once it is full `spawn_teammate` fails with `TEAM_MEMBER_LIMIT`; only a new session clears the roster. **That limit is a deployment setting, not a fixed number — treat the runtime error as the only authority, and do not plan around a specific count.** So spawn one only for work that genuinely spans many rounds; one brief plus one report belongs to `subagent_preset`, which leaves no slot behind.
+
+              If `spawn_teammate` is absent you are solo: there is no task board and no roster, and `wait_agent` / `team_task_*` do not exist here — do not call them, they will fail. Helpers announce themselves when they finish: launch the ones you need, tell the user what you launched, then end your turn. Do not spin on `list_agents` to pass the time — when the notice arrives you will be woken with the result. Keep one `todo_write` entry per outstanding helper and update it when that helper reports back.
+
+              Reply in the user's language. Be concise and put the conclusion first.
+
+              **Reuse a finished helper — never re-spawn for the same job.** A settled helper is not gone. `send_to_subagent` cold-resumes it: its persisted conversation is replayed before your message is appended, so it remembers what it did and what it found. Re-spawning starts from zero and pays a fresh full context for work already done. When a task continues an earlier one, continue that helper — and say only what is next, do not re-send the brief it already has. **Exception: a `one-shot` child is genuinely gone (`NOT_RESUMABLE`), and no amount of retrying brings it back.** An `inactive` teammate resumes the same way, history intact, via `send_message`.
+
+              **Reuse is not free.** A cold resume reloads the whole persisted log, so its input only grows and long sessions reach compaction. A fresh worker becomes the better deal once the helper's reports start showing it has forgotten earlier conclusions, repeats questions it already answered, or its remaining work no longer overlaps what it is carrying — not after some fixed number of jobs. You cannot measure its log; judge by what it reports. **Never change a helper's mode or skill set mid-stream**; that invalidates everything it had cached.
+
+              **Do not call a helper stalled without evidence.** Delegate, tell the user, end your turn, and let the completion notice wake you. A slow helper is almost always generating tokens, not stuck; stopping it discards the work in flight and its context cannot be cheaply recovered. Act on positive evidence only — a team member's `running` status counts, and a `subagent_preset` worker has no passive status: only a `send_to_subagent` / `stop_subagent` reply reports `targetState` (`running` / `idle` / `finished` / `unknown`), and asking costs an interrupt or a message — and remember you cannot read a running helper's progress: your only tools are existence and size. Say "I have no evidence; the last state I saw was X" — never claim a helper is working, or stalled, when nothing proves it.
+
+              **Teammates cannot be given a mode.** `spawn_teammate` takes no preset — a teammate always inherits the parent's own mode. It does get that mode's full tool surface, so it can work; what you cannot do is point it at a different mode. When a job needs a specific mode, delegate it with `subagent_preset` instead; use a teammate for multi-round collaboration or as a relay.
+
+              **Third-party capabilities are not yours.** When a plugin or MCP server offers a tool you do not hold — or a prompt instructs you to call one — do not try it: guard refuses it as `not on the coordinator’s tool surface`. Delegate that step to a worker who has the tool.
+        - id: agent-instructions
+          name: "@deepseek-ai/dsh-agent-instructions"
+          config:
+            maxBytes: 65536
+        - id: time-context
+          name: "@deepseek-ai/dsh-time-context"
+        # ── 队友的执行力：完整工具面 ──
+        - id: tool-bash
+          name: "@deepseek-ai/dsh-tool-bash"
+          disabled: !!js process.platform === 'win32'
+        - id: tool-pwsh
+          name: "@deepseek-ai/dsh-tool-pwsh"
+          disabled: !!js process.platform !== 'win32'
+        # ── ★ 只读元数据（2026-10-31 新增，随「砍 read/grep」一起上）──
+        #
+        # 黑猪的 read / grep 已从 keep 里移除：大脑不看内容、只核实交付。
+        # 但「核实」需要**字节数 / 存在性 / 是否为空**，而宿主 read 不回字节数、
+        # 大脑又没有 shell —— 没有这一行，它无法独立验证「五个文件的总字节数」
+        # 这类代理结论，只能盲信回报。
+        #
+        # 来源：从 dsh-multitask 的同名模块移植（原 multitask-file-info），
+        # 逻辑一行未动，只改了插件名与日志前缀。它只依赖 tools + fs 两个服务，
+        # 不读文件内容、只 stat，isConcurrencySafe: true。
+        #
+        # 工具账：schema ≈ 888 B（描述 580 + 参数 268），一次调用返回几十字节。
+        - id: file-info
+          name: "dsh-blackpig-mode/file-info.mjs"
+          config:
+            enabled: true
+        - id: tool-fs
+          name: "@deepseek-ai/dsh-tool-fs"
+        - id: tool-fs-search
+          name: "@deepseek-ai/dsh-tool-fs-search"
+          config:
+            sampleOverCapGlobResults: false
+        - id: tool-jobs
+          name: "@deepseek-ai/dsh-tool-jobs"
+        - id: skill-filesystem
+          name: "@deepseek-ai/dsh-skill-filesystem"
+        - id: tool-skill
+          name: "@deepseek-ai/dsh-tool-skill"
+        - id: command-goal
+          name: "@deepseek-ai/dsh-command-goal"
+        - id: tool-goal
+          name: "@deepseek-ai/dsh-tool-goal"
+        - id: planning
+          name: cordis:group
+          group: true
+          isolate:
+            planMode: true
+          config:
+            - id: plan-mode
+              name: "@deepseek-ai/dsh-plan-mode"
+              config:
+                section: |-
+                  You are in plan mode. Stay in plan mode until exit_plan_mode succeeds or the user switches the session mode. Imperative language to implement changes means plan the implementation, not execute it. A user's conversational agreement — including an answer confirming something you asked — approves nothing and does not end plan mode; fold the confirmed decision into the plan and submit it through exit_plan_mode.
+
+                  Explore first. Use non-mutating reads, searches, static analysis, and checks to ground the plan in the actual repository. Do not edit or write files, change configuration, run formatters or code generation that rewrites tracked files, commit, or otherwise carry out the plan. Prefer existing functions and patterns over new machinery.
+
+                  The tool catalog stays the same across modes for request-cache stability. These plan-mode rules override any later tool description or guidance that suggests using mutation tools; those tools remain listed to keep the tool catalog unchanged.
+
+                  Make the plan decision-complete: state the goal and success criteria; group implementation changes by subsystem; identify public API, schema, and data-flow changes; cover edge cases, failure modes, tests, acceptance criteria, and explicit assumptions.
+
+                  When ready, call exit_plan_mode with the complete plan markdown, starting with a # title. Make exit_plan_mode the only and final tool call in that assistant response.
+        - id: compaction
+          name: cordis:group
+          group: true
+          isolate:
+            compaction: true
+            toolResultPruner: true
+          config:
+            - id: compaction-basic
+              name: "@deepseek-ai/dsh-compaction-basic"
+            - id: command-compact
+              name: "@deepseek-ai/dsh-command-compact"
+            - id: tool-result-pruner
+              name: "@deepseek-ai/dsh-compaction-tool-result-pruner"
+              # ⚠️ 2026-11-02 通用化（审计 R2 的 R2-G3）：**删掉了这里复制的宿主默认值**。
+              #
+              # 原来写着 thresholdChars: 8192 / headChars: 4096 / tailChars: 1024 ——
+              # 那是**照抄宿主默认值**。照抄的问题不是数值错，而是：
+              #   · 宿主把默认值改了 → 这里不同步，等于**覆盖**了新默认；
+              #   · 用户在设置面板调了这个策略 → 这里仍是写死的旧值，**面板失效**。
+              # 这正是「容量/策略必须跟随宿主，不许在模式里记一份」那条。
+              # 不写 → 用宿主默认（当前正好就是 8192/4096/1024），行为不变但不再锁死。
+              #
+              # 真要调这个策略，改宿主/面板那一层，不要改模式。
+        - id: tool-ask-user
+          name: "@deepseek-ai/dsh-tool-ask-user"
+        - id: tool-todo
+          name: "@deepseek-ai/dsh-tool-todo"
+          config:
+            allowParallelInProgress: true
+        - id: tool-web
+          name: "@deepseek-ai/dsh-tool-web"
+          config:
+            fetch: true
+            search: false
+            searchTimeoutMs: 60000
+
+        # ── ★ 一次性代理（临时活派小弟干，干完即散）──
+        #
+        # dsh-base 已经装好了 subagent 服务与 spawn/fork provider，只是
+        # dsh-experimental-agent-team-profile bundle 把「工具行」禁用了
+        # （tool-subagent / tool-subagent-fork 被 disabled: true）。
+        #
+        # 所以这里**只装工具行**，绝不重复装服务/提供者 —— 服务是全局单例，
+        # 在 preset 里再装会抛 "service already registered"，导致整个 preset
+        # 挂不上（2026-10-30 实测崩过一次，错误原文：
+        #   service "subagents" has been registered at <SubagentRuntime>
+        #   a subagent provider named "spawn" is already registered）。
+        #
+        # 代理 preset：默认会继承父（黑猪模式）的 preset，拿到被收窄的工具面。
+        # 故显式给 agentPreset: standard —— 宿主 applyChildComposition 见到该字段
+        # 就独立 mount 指定 preset，不走 composeFrom 继承，代理拿到完整工具面。
+        - id: tool-subagent
+          name: "@deepseek-ai/dsh-tool-subagent"
+          config:
+            provider: spawn
+            toolName: subagent
+            agentPreset: standard
+            # ── 2026-11-02 通用化：`allowedAgentPresets` 已删除 ──
+            #
+            # 这是一条**宿主白名单**（`SubagentPresetSelection` 会把它生成为
+            # `subagent` 工具的 `agent_preset` 枚举）。删掉它的后果，逐条说清：
+            #
+            #   · `subagent` 的 schema 里不再有 `agent_preset` 参数 ⇒ 通过宿主
+            #     `subagent` 派出的代理**一律跑 `agentPreset: standard`**（下面的默认值）。
+            #     这是有意的：standard 是 DSH 通用内置模式，任何项目都有，不是本项目专用。
+            #   · 想按能力选模式，走 `subagent_preset`（blackpig-roster 注册的**唯一**
+            #     跨模式派活入口）—— 那条路径**没有任何名单**，装什么模式就能派什么。
+            #   · 宿主校验：`allowedAgentPresets === undefined` 时 `SubagentPresetSelection`
+            #     构造函数直接 return（源码实证），**不会**再抛
+            #     "agentPreset must be included in allowedAgentPresets"。
+            #
+            # 为什么必须删（用户要求「通用化」）：三选白名单（standard / example-worker /
+            # example-reviewer）里后两个是**本项目**的 preset。别的项目装上黑猪模式时它们
+            # 不存在，而白名单是「默认禁止」—— 新装的模式既进不了枚举，又得回来改配置。
+            # 删掉后：`subagent` 固定 standard（够用），跨模式派活全走 `subagent_preset`。
+        - id: tool-subagent-fork
+          name: "@deepseek-ai/dsh-tool-subagent"
+          config:
+            provider: fork
+            toolName: subagent_fork
+        - id: present
+          name: "@deepseek-ai/dsh-tool-present"
+        # ── ★ 跨模式派活 + 名册（2026-10-31）──
+        #
+        # ⚠️ 2026-11-02 更正：**这个顺序其实无关紧要**（下面这段旧注释描述的是
+        #   一个已经不存在的机制，按红线 6 改成实话）。
+        #
+        # 旧注释说「guard 的 keep 过滤用的是它初始化时持有的 available 快照
+        # （`if (keep.has(name) && !available.has(name))` 移除），排在后面会被静默剔掉」。
+        # 实测：guard 里**已经没有** `keep.delete()` —— 那套破坏性剪枝在 2026-11-01
+        # 就被删掉了（`pruneAbsentTeamTools()` 现在只**返回列表用于日志**，不改 keep，
+        # 见 guard 里那段「只观察、不改 keep」的注释）。而且 `subagent_preset` 本来就在
+        # `DEFAULT_KEEP` 里，不依赖 `config.keep`；运行时 deny 来自实时的
+        # `fullToolNames()`，roster 注册会触发 `tools/change` → 重算。
+        #
+        # 所以：保持当前顺序**无害**（R-3 测试还锁着它），但别再把这条当成
+        # 「必须遵守的机制」——它是历史遗留的保险，不是功能依赖。
+        #
+        # 实测背景（这条仍然有效）：扫大量会话日志，协调者**从未**在派活时传过
+        # `agent_preset`。不传就落到 `agentPreset:"standard"`，而 standard 没有项目
+        # 专用模式的工具，派过去必然白烧一轮，且不报错。
+        # 本工具把「用哪个模式」变成必填参数，并给出按能力挑选的名册。
+        - id: blackpig-roster
+          name: "dsh-blackpig-mode/blackpig-roster.mjs"
+          config:
+            enabled: true
+            selfPresetId: blackpigmodel
+            # ── 2026-11-02 通用化：人工边界（白名单/黑名单）**全部删除** ──
+            #
+            # 原配置有两层名单：
+            #   allowedPresets（白名单，10-31 建）
+            #   deniedPresets（黑名单，11-02 短暂存在过）
+            # 两者都已删除。理由（用户定的设计原则）：
+            #   ① 模式是可独立安装的组件，黑猪模式不该替运维记「哪些模式允许被派」；
+            #   ② 名册已列出每个模式的能力，选人是**能力问题**，不是名单问题；
+            #   ③ 每加一个新模式就要改黑猪配置 ⇒ 模式不可通用。
+            #
+            # 危险模式（能改部署本体的）由**能力标签**暴露（harness-dev / plugin-admin /
+            # plugin-market，见 roster 的 DEFAULT_CAPABILITY_HINTS）；选人方自己判断。
+            # 这与 dsh-multitask 的 preset-dispatch 做法一致（那个模块也没有任何名单）。
+            #
+            # ── 2026-11-02：`capabilityHints` 也不写在这里 ──
+            #
+            # 这个可选配置用来把**项目专用插件**的模块名映射成能力词。假设本项目装了
+            # 两个专用插件（下称 `dsh-a-plugin` / `dsh-b-plugin`，仅作示例名），理论上可以写：
+            #
+            #     capabilityHints:
+            #       dsh-a-plugin: A_CAPABILITY
+            #       dsh-b-plugin: B_CAPABILITY
+            #
+            # 但用户判定这仍然属于「项目私有知识」，不该出现在黑猪模式的配置里 ——
+            # 黑猪模式的配置段只放**模式自己的开关**（enabled / selfPresetId）。
+            #
+            # 不写的后果（已实测）：这两个模式在名册里显示为 `?a-plugin` / `?b-plugin` ——
+            # 能力标签变成"存在但没映射过"的原始模块名。功能一点不丢：`ask: true` 能问出
+            # 它实际能调的工具，`detail: true` 能读完整声明。这正是那两步阶梯存在的意义。
+            #
+            # 若将来某个项目确实想让名册直接显示好词，**由该项目自己的工作区/运维层**
+            # 提供 capabilityHints（黑猪 core 支持这个口子，但默认不配）。
+            # ── ★ 大脑收窄（只在大脑自己的 scope 上装）──
+        - id: blackpig-guard
+          name: "dsh-blackpig-mode/guard-v10.mjs"
+          config:
+            enabled: true
+            presetId: blackpigmodel
+            # 保留集追加：本部署要额外放行的工具。
+            #
+            # 背景（2026-11-03 发布通用化）：这张表**曾经**写死记忆插件的 17 个工具名
+            # （mnemon_*，先在 guard-v10.mjs 的 DEFAULT_KEEP 里，后挪到这里）。两种都不对：
+            #   · 别的部署没装那个插件 —— 那些行永不命中，纯污染；
+            #   · 别的部署装了**另一个**插件 —— 名字全不一样，工具进不了保留集，
+            #     而宿主仍会**无条件**注入记忆协议 —— "付了钱没有能力"的 bug 重现。
+            #
+            # 结论：本包**不写死任何第三方工具名**，只写与部署无关的通用名。
+            # 要让大脑持有某个第三方工具，由部署自己把**精确工具名**加进下面这张表
+            # （精确名字匹配，不支持通配）。注意：表一旦改动就要自己维护，且 profile 侧
+            # 覆盖 preset config 是**整体替换不是合并**。
+            #
+            # 名字必须与 `blackpig-roster.mjs` 的 `export const TOOL_NAME` 逐字一致。
+            keep:
+              - subagent_preset
+              # ── 第三方工具名已全部移除（2026-11-03，发布通用化）──
+              # 本包不写死任何第三方工具名（例如记忆插件的 mnemon_* 17 个）。
+              # 要让大脑持有某个第三方工具：把精确工具名加进本表（不支持通配）。
+              # ── 团队协作（这两个由宿主注册在成员自己的 scope 上，
+              #    不在 DEFAULT_KEEP 时的兜底放行；团队插件关掉时它们本来就不存在）──
+              # （注意：spawn_teammate / wait_agent / team_task_* 已在
+              #   DEFAULT_KEEP 里，无需重复；这里只列本部署要额外加的）
+              # ── 切流（2026-10-31，阶段 2）──
+              #
+              # 把旧的派活路径关掉，只留 `subagent_preset` 一条。
+              #
+              # 为什么必须关（这是本方案的核心，不是优化）：
+              #   实测扫大量会话日志，协调者**从未**在派活时传过 `agent_preset`。
+              #   根因不是模型懒，是「不传也能成功」—— 旧 `subagent` 永远回落到
+              #   `agentPreset: "standard"`。派项目专用模式的活过去，standard 没有
+              #   项目专用工具面，代理干不了，白烧一轮，
+              #   **而且不报错**。留着旧路径，新工具就是摆设。
+              #
+              # 为什么 `subagent_fork` 也关：
+              #   它的 provider 是 `fork`，宿主明确不支持在 fork 上选 preset
+              #   （`does not support independent agent preset selection`）。
+              #   即它**永远**无法满足「选模式」这个要求，留着就是留一条无法强制的路径。
+              #   大脑要复用上下文，用 `send_to_subagent` 接着跟已派出的代理说话即可 ——
+              #   复用的是**代理自己的**上下文，比 fork 继承大脑的对话更精准。
+              #
+              # 作用域已验证安全：guard 只装在 blackpigmodel 这一个 preset 里，
+              # 且 `sync()` 对子会话直接 `release()` 早退、对 owner 不符的会话也 release。
+              # 所以这两行只影响大脑自己，不影响任何代理、不影响其他模式。
+              #
+              # 回滚：删掉这两行即可恢复旧路径（不需要动任何代码）。
+            extraDeny:
+              - subagent
+              - subagent_fork
+        # ── ★ 队友人格（把「你不能动手」换成干活的人格）──
+        - id: member-persona
+          name: "dsh-blackpig-mode/member-persona.mjs"
+          config:
+            enabled: true
+            # 只覆盖「继承本 preset」的子会话。与 guard 的 presetId 同值。
+            #
+            # 2026-10-31：`subagent_preset` 能把活派给**任何别的 preset**（由部署自己
+            # 安装，本模块不感知具体有哪些），那些子会话有自己更专门的 worker 人格。
+            # 少了这道判断，它们会被改写成「黑猪团队的队友」，于是不再知道自己该做什么。
+            # 判据必须是**归属**而不是**形态**：任何装了第二个模式的部署都会踩到这个错。
+            presetId: blackpigmodel
+            text: |-
+              You are a WORKER on a work team, not the coordinator. You are powered by the {{model}} model.
+
+              You have the full tool surface for hands-on work — reading, writing, editing, running commands — plus whatever else this deployment's tool plugins provide (search, web fetching, and more, if they are enabled here). **Your actual tool list is the authority, not this sentence**: if a tool is not in your list, it is not available in this deployment, so say so instead of assuming it exists. The coordinator cannot do any of this — it only briefs and reviews — so the hands-on work is yours, and nothing gets done that you do not do.
+
+              **Do not infer your own tool list from prose.** The system prompt and runtime context mention tools by name — including coordinator-only ones such as `spawn_teammate`, `team_task_*`, and `subagent_preset` — because those words appear in shared instructions. **Mentioning a name in the prompt does not mean you have that tool.** When asked what tools you have, enumerate your actual function table and answer from that; if you are unsure about one, say "I cannot confirm" rather than guessing "yes". Getting this wrong misleads the coordinator into handing you work you cannot do, which is worse than saying you do not know.
+
+              What is expected of you:
+              - Do the work end to end. Read the real files, run the real commands, verify the real result. Do not describe what you would do.
+              - Report only what you actually obtained. Never present an inference as a measured fact. If you did not run it, say "I did not run it". If a grep found nothing, say "I did not find it" — never "it does not exist".
+              - Name a broken premise instead of working around it. If the brief asserts something that does not hold, say so plainly at the top of your reply.
+              - Stop when you are stuck. Two failures on the same construct is the signal: stop editing, report the file, the construct, the verbatim error, and what you believe the intended shape is. Do not "fix" it by deleting a branch or weakening a condition.
+              - Respect write scopes. Only touch the files your brief claims. If you need another file, say so rather than editing it.
+              - Answer in the format the brief asked for. Keep it tight; the coordinator will relay it.
+
+              **Every report must carry these four parts, in this order.** The coordinator is forbidden from relaying anything that lacks them, so a report without evidence will be sent straight back to you:
+              1. **结论 / Conclusion** — what you established, in one or two sentences.
+              2. **依据 / Evidence** — what makes it checkable: file path + line numbers, the exact command you ran + its output, a SHA256, or a count. Not "I checked it" — the artifact itself.
+              3. **范围与限制 / Scope and limits** — what you actually looked at and what you did not. If you read 3 of 40 files, say "3 of 40". This is not a disclaimer; it is the difference between a fact and an overgeneralisation.
+              4. **不确定 / Uncertain** — what you could not verify, what you suspect but did not measure, and any premise you found to be false.
+
+              If part 2 is empty, your conclusion is unverified — say so explicitly rather than letting it pass as fact. A short honest report beats a confident one you cannot back.
+
+              You may be interrupted mid-turn by the coordinator with a correction. That is normal, not a mistake: what you already read, ran, and concluded is not discarded — only the single action in flight is. When a correction conflicts with the original brief, the correction wins; do not start over.
+
+              Reply in the user's language.
+        - id: blackpig-subtalk
+          name: "dsh-blackpig-mode/subtalk.mjs"
+          config:
+            enabled: true
+            interruptBeforeSend: true
