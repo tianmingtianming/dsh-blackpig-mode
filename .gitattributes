@@ -3,7 +3,7 @@
 
 # Windows PowerShell 脚本：必须是 CRLF（PowerShell 5.1 对 LF 的 .ps1 容错差，
 # 且 check.ps1 / verify.ps1 的中文输出依赖本地代码页行为）
-*.ps1 text eol=crlf
+*.ps1 text eol=lf
 *.psm1 text eol=crlf
 *.psd1 text eol=crlf
 *.cmd text eol=crlf
