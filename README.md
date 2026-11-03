@@ -106,14 +106,14 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\verify.ps1 -Profile <你�
 它做 5 项核对：
 
 1. 包是否落盘到 `profiles\<名>\node_modules\dsh-blackpig-mode`，以及核对包内文件字节：11 个条目里 **8 个参与字节校验**，`README.md` / `check.ps1` / `verify.ps1` 三个显示 `[SKIP]` 不参与（原因见本节末尾）
-2. `profiles\<名>\package.json` 的 `dependencies` 与 `dsh.profile.bundles` 是否都登记了本包
+2. `profiles\<名>\package.json` 的 `dependencies` **或** `optionalDependencies`（二者任一即可）与 `dsh.profile.bundles` 是否都登记了本包
 3. `cordis.patch.yml` 里是否还残留旧的 `blackpigmodel` 声明
 4. `dsh --profile <名> --dump-config` 的退出码是否为 0，输出里 `preset-blackpigmodel` 是否恰好出现 1 次
 5. 汇总结论并给退出码（`0` 可直接使用 / `1` 有缺件或冲突 / `2` 环境不满足）
 
 关于第 4 项：`desktop` 这个 profile 由 Electron 独占，`dsh` CLI 会硬拒绝 `--dump-config`。此时 `verify.ps1` 会自动在 `%TEMP%` 下建一个影子 profile（复制 `package.json` 与 `cordis.patch.yml`，`node_modules` 用目录联接只读指回真 profile）来复核，跑完立即删除。真 profile 的 `node_modules` 不被写入。
 
-**为什么第 1 项里有三个 `[SKIP]`。** `README.md` 随文档更新，改一次字节就变，参与校验没有意义。`check.ps1` / `verify.ps1` 则是因为 `.gitattributes` 里写了 `*.ps1 text eol=crlf`：仓库里存的是 LF，克隆或 `npm pack` 之后变成 CRLF，同样内容的 `check.ps1` 会从 13,564 字节变 13,877（+313），`verify.ps1` 从 22,982 变 23,437（+455）。这两个文件若参与字节校验，**每一个克隆用户都会误报「版本不符」**。注意改用 SHA256 也救不了——换行符一变 SHA 同样对不上。所以真正参与字节比对的只有 8 个文件。
+**为什么第 1 项里有三个 `[SKIP]`。** `README.md` 随文档更新，改一次字节就变，参与校验没有意义。`check.ps1` / `verify.ps1` 也会随编辑变化，且换行符口径依赖 `.gitattributes`；**当前 `.gitattributes` 是 `*.ps1 text eol=lf`**，入库与 `npm pack` 打包都是 LF（已实测：包内 `verify.ps1` 与源码字节数、SHA256 完全一致）。即便如此这两个脚本仍不参与字节校验——写死自身字节的期望值，等于每改一次脚本就要改两处，还容易忘。注意改用 SHA256 也救不了：只要换行符口径一变，SHA 同样对不上。所以真正参与字节比对的只有 8 个文件，**脚本尺寸一律以 `verify.ps1` 内置期望值表为准，本文不抄具体数字**。
 
 **`check.ps1` 是安装前脚本，装完再跑它会返回 exit 1。** 它第 4 项专门查 `package.json` 里有没有黑猪包名，装好之后必然命中，于是给出 WARN + `NEEDS-CLEANUP`（exit 1）。这是设计如此，不是装坏了、也不是要你去清理。装后验证请用 `verify.ps1`。
 
@@ -193,7 +193,7 @@ preset id 固定是 `blackpigmodel`，不能两个 bundle 各声明一次。会�
 
 逐文件字节数不写在这张表里：包内的 `verify.ps1` 有一份内置期望值表，才是权威来源，本表抄一份只会过期。要核对就运行 `verify.ps1`，第 1 项会逐个打印实际字节与期望字节的差值。
 
-三个 `[SKIP]` 的理由：`README.md` 随文档改动而变；`check.ps1` / `verify.ps1` 受 `.gitattributes` 的 `*.ps1 text eol=crlf` 影响，入库 LF、克隆/打包后变 CRLF（+313 / +455 字节），参与校验会让每个克隆用户误报版本不符。
+三个 `[SKIP]` 的理由：`README.md` 随文档改动而变；`check.ps1` / `verify.ps1` 本身会随编辑变化（当前 `.gitattributes` 为 `*.ps1 text eol=lf`，入库与打包均为 LF，不会因换行符变形），但仍不参与字节校验，避免改脚本时忘了同步期望值。
 
 两点容易踩：
 

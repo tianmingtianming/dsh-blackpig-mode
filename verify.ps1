@@ -92,18 +92,19 @@ $expected = [ordered]@{
     'file-info.mjs'       = 25863
     'member-persona.mjs'  = 15054
     'package.json'        = 727
-    'README.md'           = 20582   # 仅记录最后已知尺寸，不参与校验
+    'README.md'           = 0       # 仅记录最后已知尺寸（不参与校验，故置 0）
     'LICENSE'             = 1073
     'check.ps1'           = 13564
-    'verify.ps1'          = 0       # 自引用，不参与校验
+    'verify.ps1'          = 0       # 自引用：写死自身字节必然追不上，不参与校验
 }
 
 # 不参与字节校验的文件（允许编辑，或换行符随 git 配置变化）：
 #   README.md  —— 随文档更新
 #   verify.ps1 —— 自身，改一次字节就变，参与校验必然自死循环
-#   check.ps1  —— .gitattributes 有 *.ps1 text eol=crlf，克隆 / npm pack 后换行符变 CRLF，
-#                 字节从 13564 变 13877（+313），参与校验会让所有克隆用户误报版本不符。
-# 注意：不要改用 SHA256 —— CRLF 一变 SHA 同样对不上。
+#   check.ps1  —— 该脚本本身随检查项增删而变，且换行符口径依赖 .gitattributes。
+#                 当前 .gitattributes 为 *.ps1 text eol=lf，入库与打包后都是 LF，
+#                 但仍不参与校验，避免以后规则再调整时误报版本不符。
+# 注意：不要改用 SHA256 —— 换行符口径一变 SHA 同样对不上。
 $skipSizeCheck = @('README.md', 'check.ps1', 'verify.ps1')
 
 $dshHome    = Get-DshHome
@@ -175,7 +176,7 @@ if (-not (Test-Path -LiteralPath $pkgDir -PathType Container)) {
         Report 'OK' '1/5' '包落盘' (($expected.Count - $missing).ToString() + ' 个文件齐全，字节数与内置期望值全部一致；README.md 不参与字节校验（允许编辑）')
     }
     Write-Output '       文件明细（字节，UTF-8 口径）:'
-    Write-Output '       注: 本脚本 (verify.ps1) 与 check.ps1 不参与字节校验（换行符随 git 配置变化，见 .gitattributes 的 *.ps1 eol=crlf）'
+    Write-Output '       注: 本脚本 (verify.ps1) 与 check.ps1 不参与字节校验（换行符随 git 配置变化，见 .gitattributes 的 *.ps1 eol=lf）'
     foreach ($r in $fileRows) { Write-Output $r }
     if ($extraFiles.Count -gt 0) {
         Write-Output ('       另有 {0} 个非清单文件（不参与校验）: {1}' -f $extraFiles.Count, (($extraFiles | ForEach-Object { $_.Name }) -join ', '))
@@ -198,17 +199,31 @@ if (-not (Test-Path -LiteralPath $pkgPath)) {
     if ($pkg) {
         $deps = @()
         if ($pkg.dependencies) { $deps = @($pkg.dependencies.PSObject.Properties.Name) }
+        $optDeps = @()
+        if ($pkg.optionalDependencies) { $optDeps = @($pkg.optionalDependencies.PSObject.Properties.Name) }
         $bundles = @()
         if ($pkg.dsh -and $pkg.dsh.profile -and $pkg.dsh.profile.bundles) { $bundles = @($pkg.dsh.profile.bundles) }
+
+        # 按 README 第 7 条：用本地 file: 指向 tgz 安装时，依赖应放进 optionalDependencies。
+        # 因此 dependencies 与 optionalDependencies 任一含本包，都算「已登记」，不报 FAIL。
         $inDeps    = ($deps    -contains 'dsh-blackpig-mode')
+        $inOptDeps = ($optDeps -contains 'dsh-blackpig-mode')
         $inBundles = ($bundles -contains 'dsh-blackpig-mode')
 
-        if ($inDeps -and $inBundles) {
-            Report 'OK' '2/5' 'profile 登记' 'dependencies 与 dsh.profile.bundles 都有 dsh-blackpig-mode'
+        $where = @()
+        if ($inDeps)    { $where += 'dependencies' }
+        if ($inOptDeps) { $where += 'optionalDependencies' }
+
+        if ($where.Count -gt 0 -and $inBundles) {
+            Report 'OK' '2/5' 'profile 登记' (($where -join ' 与 ') + ' 与 dsh.profile.bundles 都登记了 dsh-blackpig-mode')
+            if ($inOptDeps) {
+                Write-Output '       [INFO] 该包登记在 optionalDependencies（按 README 第 7 条，属正常）'
+                if ($inDeps) { Write-Output '       [INFO] dependencies 里也有一份；两处并存不影响运行，留一处即可' }
+            }
         } else {
             $miss = @()
-            if (-not $inDeps)    { $miss += 'dependencies' }
-            if (-not $inBundles) { $miss += 'dsh.profile.bundles' }
+            if ($where.Count -eq 0) { $miss += 'dependencies/optionalDependencies' }
+            if (-not $inBundles)    { $miss += 'dsh.profile.bundles' }
             Report 'FAIL' '2/5' 'profile 登记' ('缺: ' + ($miss -join ' 与 ') + ' —— 重跑 dsh plugin --profile ' + $Profile + ' add dsh-blackpig-mode')
             [void]$script:verdicts.Add(('profile 缺 ' + ($miss -join '/')))
         }
@@ -304,6 +319,8 @@ if (-not $dshCmd) {
                 $srcVer = '0.0.0'
                 if ($srcPkg -and $srcPkg.dependencies -and $srcPkg.dependencies.'dsh-blackpig-mode') {
                     $srcVer = [string]$srcPkg.dependencies.'dsh-blackpig-mode'
+                } elseif ($srcPkg -and $srcPkg.optionalDependencies -and $srcPkg.optionalDependencies.'dsh-blackpig-mode') {
+                    $srcVer = [string]$srcPkg.optionalDependencies.'dsh-blackpig-mode'
                 }
                 if ($srcPkg -and $srcPkg.dsh -and $srcPkg.dsh.profile -and $srcPkg.dsh.profile.bundles) {
                     $srcBundles = @($srcPkg.dsh.profile.bundles)
