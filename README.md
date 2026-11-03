@@ -25,41 +25,47 @@
 
 ---
 
-## 安装
+## 安装（三种，按推荐顺序）
 
-三步。**装之前必须先跑第 1 步**，否则最常见的失败方式（见「已知限制 4」）会直接撞上。
+### 1. 首选：直接从 GitHub 装（一条命令，仓库已公开）
 
-### 第 1 步：装前检查
-
-```
-powershell -NoProfile -ExecutionPolicy Bypass -File .\check.ps1 -Profile <你的profile名>
+```powershell
+dsh.cmd plugin --profile <名> add github:tianmingtianming/dsh-blackpig-mode
 ```
 
-`check.ps1` 只读，不写任何文件。它检查 7 项：DSH 安装位置、profile 目录、`cordis.patch.yml` 里是否已有同 id 声明、`package.json` 是否已含本包名、`node_modules` 残留、`extraDeny` 是否误禁了 `subagent_preset`、以及 `-DryRun` 时的装包影响范围。
+前提：**你的机器上装了 git**（`git --version` 能跑）。本包零依赖、零构建脚本，不需要额外编译步骤。
 
-- 退出码 `0`（READY）：可以装。**干净的 profile（没有 `cordis.patch.yml`、没有同 id 冲突声明）返回的就是 0**，不是 1——早前版本会误报 1，现在不会。
-- 退出码 `1`（NEEDS-CLEANUP）：有残留或冲突，先按它给出的行号清理。**只有真冲突/真残留才返回 1**。「已有 `blackpigmodel` 声明」这一项它会直接报出行号，把该行所在的整段 `- insert:` 块删掉再重跑。
-- 退出码 `2`（BLOCKED）：找不到 `dsh.cmd` 或 profile 目录，环境不满足。
+### 2. 次选：从 Release 装（不需要 git）
 
-### 第 2 步：装
-
-```
-"%LOCALAPPDATA%\Programs\DeepSeek Harness\resources\runtime\cli\bin\dsh.cmd" plugin --profile <你的profile名> add <tgz 文件路径>
+```powershell
+dsh.cmd plugin --profile <名> add https://github.com/tianmingtianming/dsh-blackpig-mode/releases/download/v1.0.0/dsh-blackpig-mode-1.0.0.tgz
 ```
 
-也可以用 npm 包名（**npm 发行版尚未发布，当前请用 `.tgz`**）：
+### 3. 兜底：本地 tgz（离线、或上面两条都不通时）
 
+先把 tgz 解包到一个目录，在**那个目录里**跑装前检查（只读，7 项）：
+
+```powershell
+.\check.ps1 -Profile <名>
+dsh.cmd plugin --profile <名> add <tgz的完整路径>
+.\verify.ps1 -Profile <名>
 ```
-"%LOCALAPPDATA%\Programs\DeepSeek Harness\resources\runtime\cli\bin\dsh.cmd" plugin --profile <你的profile名> add dsh-blackpig-mode
+
+> `check.ps1` 与 `verify.ps1` 在解包后的目录里。**装完之后再跑 `check.ps1` 会返回 exit 1，这是设计行为**（它第 4 项会因「已含包名」报 WARN），不是装坏了；装后验证请用 `verify.ps1`。
+
+### 装完怎么核对
+
+无论走哪条路，装完后 `check.ps1` / `verify.ps1` 都会落在 `node_modules\dsh-blackpig-mode\` 里，可以直接从那里跑：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File "<profile目录>\node_modules\dsh-blackpig-mode\verify.ps1" -Profile <名>
 ```
 
-**不要把包目录的绝对路径直接 `add` 进去**（例如 `add file:C:\path\to\dsh-blackpig-mode`）。那样装出来的是 `link:` / Junction，指向源目录；源目录一删或一挪，装好的模式就坏了。用 `.tgz` 或 npm 包名。
+### 装之前要注意
 
-装完 `dsh` 会做两件事：在 `profiles\<名>\package.json` 的 `dependencies` 和 `dsh.profile.bundles` 里都登记 `dsh-blackpig-mode`；并读取本包 `package.json` 里的 `"dsh": { "bundle": { "patch": "./cordis.patch.yml" } }` 来挂载 preset 声明行。**它不会改你的 `cordis.patch.yml`**。
-
-### 第 3 步：确认模式出现（通常自动生效）
-
-装完先别急着重启：`dsh` CLI 装包会改 profile 的 `package.json`，HMR 监视到 `dsh.profile.bundles` 变化后会自己重组 profile，模式一般立刻出现。新开一个会话看模式选择里有没有「黑猪模式」；**没出现再重启一次 DSH**（原因见「已知限制 3」）。
+- 装前必须先跑 `check.ps1`（第 3 种方式里已包含），它会告诉你 profile 里有没有同名 `blackpigmodel` 声明。它只读、不写任何文件；退出码 `0` = READY，`1` = 有残留/冲突（会报行号），`2` = 环境不满足（找不到 `dsh.cmd` 或 profile 目录）。
+- 装完 `dsh` 会在 `profiles\<名>\package.json` 的 `dependencies` 与 `dsh.profile.bundles` 里都登记 `dsh-blackpig-mode`，并读取本包 `package.json` 的 `"dsh": { "bundle": { "patch": "./cordis.patch.yml" } }` 挂载 preset 声明；**它不会改你的 `cordis.patch.yml`**。
+- 你需要会用命令行、能重启应用、接受 Windows 优先。
 
 ---
 
@@ -109,7 +115,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\verify.ps1 -Profile <你�
 
 ## 已知限制
 
-六条。每条都说清「缺了会怎样」。
+七条。每条都说清「缺了会怎样」。
 
 **1. 大脑没有第三方插件提供的工具（本包不写死任何第三方工具名）。**
 典型例子：装了记忆插件（如 `dsh-mnemon`），它的记忆协议仍会被宿主**无条件注入**到系统提示里（`dsh-mnemon/lib/index.js` 的 `mnemon:routing` 与 `mnemon:strategy` 两段：前者可用 `routingGuidance:false` 关掉一句，后者随 View 无条件注入、**没有开关**），但那些工具会被 guard 从大脑工具面上摘掉。结果是大脑会看到「用记忆工具」的提示却调不到它们——**这是已知噪音，不是故障**。要查历史、写记忆，派子代理去做（子代理保留完整工具面）。
@@ -132,9 +138,12 @@ preset id 固定是 `blackpigmodel`，不能两个 bundle 各声明一次。会�
 桌面版 profile 由 `dsh-desktop-host` 管理。在命令行裸跑 `node bin.js` 走的是另一条路径，会被 `rejectElectronProfile` 拒绝。
 *缺了会怎样*：用裸 node 装，报 `rejectElectronProfile`，装不上。另外 `desktop` 这个 profile 还被 Electron 独占，`--dump-config` 也读不了（`verify.ps1` 会自动改用影子 profile 绕过去）。
 
-**6. 不要把包目录的绝对路径直接 `add`。**
-`dsh plugin add file:C:\...\dsh-blackpig-mode` 会装成 `link:` / Junction 指向源目录，而不是复制文件。
-*缺了会怎样*：源目录一删、一挪、一改，装好的模式立刻坏掉，而且报错方式取决于坏在哪一步，很难查。用 `.tgz` 或 npm 包名。
+**6. 包目录路径不能直接 `add`。**
+**别用「包目录路径」去 add**（例如 `add file:C:\path\to\dsh-blackpig-mode`），会装成 Junction / 软链，源目录一删一挪就坏。**用 `.tgz` 文件路径或远程 URL 都行。**
+*缺了会怎样*：源目录一删、一挪、一改，装好的模式立刻坏掉，而且报错方式取决于坏在哪一步，很难查。
+
+**7. 本地 `file:` 指向 tgz 装时，要放进 `optionalDependencies`。**
+**如果你用本地 `file:` 指向 tgz 安装**：请把这条依赖放进 `optionalDependencies`，不要放进 `dependencies`。否则那个 tgz 一旦被删除或挪走，`pnpm install` 会整体失败（`ENOENT`，exit `-4058`），**连装别的插件也装不了**。放进 `optionalDependencies` 后，pnpm 只跳过它、其余照装（已实测：tgz 不存在 + 有/无 lockfile、远程 URL 404，三种情形均为 exit 0）。
 
 ---
 
@@ -249,6 +258,8 @@ This section is the author's own account, not a third-person commentary.
 > When it was done I realised something about life: **a person's context is only so long, so most of your time has to go to what you are willing to do.**
 
 How that became this code: reading files eats context, so reading was handed to workers. The coordinator's `read` and `grep` are removed from its tool surface (keeping `grep` would leave half of `read`), leaving only two verification tools: `file_info` (file kind / existence / byte count) and `read_image`. The trade is deliberate: **the coordinator cannot see file contents** — to learn what a file says it must send someone to look and bring back line numbers and quoted text; in exchange **context is not eaten by file contents**, and the main conversation carries only conclusions and judgement. That is why briefs must be self-contained, why verification must be done by someone else, and why reports must carry evidence.
+
+Install, three ways in order of preference: `dsh.cmd plugin --profile <name> add github:tianmingtianming/dsh-blackpig-mode` (needs git); the v1.0.0 Release tarball URL (no git needed); or a local `.tgz` path after unpacking it and running `check.ps1` first. Full steps are in the Chinese section above.
 
 Windows-first, DSH-only, requires the desktop CLI (`dsh.cmd`); no restart is normally needed (HMR recomposes the profile when `dsh.profile.bundles` changes) — restart only if HMR is off or the mode does not appear. MIT licensed.
 
