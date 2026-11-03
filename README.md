@@ -63,9 +63,15 @@ powershell -NoProfile -ExecutionPolicy Bypass -File "<profile目录>\node_module
 
 ### 装之前要注意
 
-- 装前必须先跑 `check.ps1`（第 3 种方式里已包含），它会告诉你 profile 里有没有同名 `blackpigmodel` 声明。它只读、不写任何文件；退出码 `0` = READY，`1` = 有残留/冲突（会报行号），`2` = 环境不满足（找不到 `dsh.cmd` 或 profile 目录）。
+- 装前必须先跑 `check.ps1`（第 3 种方式里已包含），它会告诉你 profile 里有没有同名 `blackpigmodel` 声明。它只读、不写任何文件。
 - 装完 `dsh` 会在 `profiles\<名>\package.json` 的 `dependencies` 与 `dsh.profile.bundles` 里都登记 `dsh-blackpig-mode`，并读取本包 `package.json` 的 `"dsh": { "bundle": { "patch": "./cordis.patch.yml" } }` 挂载 preset 声明；**它不会改你的 `cordis.patch.yml`**。
 - 你需要会用命令行、能重启应用、接受 Windows 优先。
+
+**`check.ps1` 的三个退出码**：
+
+- **`0` = READY**：可以安装。干净 profile（目录存在、还没装过黑猪模式）返回这个。
+- **`1` = NEEDS-CLEANUP**：有残留或冲突，按它给出的行号清理后重跑。**注意：装完之后再跑 `check.ps1` 也会返回 1**（第 4 项会因「已含包名」报 WARN），这是设计行为，不是装坏了——装后请改用 `verify.ps1`。
+- **`2` = BLOCKED**：环境不满足——找不到 `dsh.cmd`，**或 profile 目录根本不存在**。全新环境里若报 2，先用 `dsh` 初始化那个 profile（随便跑一条 `dsh.cmd plugin --profile <名> list` 之类），让它把目录建出来再跑。
 
 ---
 
@@ -260,6 +266,8 @@ This section is the author's own account, not a third-person commentary.
 How that became this code: reading files eats context, so reading was handed to workers. The coordinator's `read` and `grep` are removed from its tool surface (keeping `grep` would leave half of `read`), leaving only two verification tools: `file_info` (file kind / existence / byte count) and `read_image`. The trade is deliberate: **the coordinator cannot see file contents** — to learn what a file says it must send someone to look and bring back line numbers and quoted text; in exchange **context is not eaten by file contents**, and the main conversation carries only conclusions and judgement. That is why briefs must be self-contained, why verification must be done by someone else, and why reports must carry evidence.
 
 Install, three ways in order of preference: `dsh.cmd plugin --profile <name> add github:tianmingtianming/dsh-blackpig-mode` (needs git); the v1.0.0 Release tarball URL (no git needed); or a local `.tgz` path after unpacking it and running `check.ps1` first. Full steps are in the Chinese section above.
+
+`check.ps1` exit codes: **0 = READY**, **1 = NEEDS-CLEANUP** (also returned *after* a successful install — that is by design, use `verify.ps1` afterwards), **2 = BLOCKED** (no `dsh.cmd`, or the profile directory does not exist yet — initialize the profile first).
 
 Windows-first, DSH-only, requires the desktop CLI (`dsh.cmd`); no restart is normally needed (HMR recomposes the profile when `dsh.profile.bundles` changes) — restart only if HMR is off or the mode does not appear. MIT licensed.
 
