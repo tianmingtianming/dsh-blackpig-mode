@@ -50,13 +50,18 @@ function warnOnceFactory(ctx) {
   }
 }
 
-/** 判断一个 agent 是不是被委派出来的子会话。 */
+/**
+ * 判断一个 agent 是不是被委派出来的子会话。
+ * fork（`isSeeded: true` 且有 parentSession）**不算**子会话：它的 parentSession 是历史来源。
+ */
 function isDelegatedChild(agent) {
   const header = agent?.session?.header
   if (header === undefined || header === null || typeof header !== 'object') return false
   if (header.origin === 'subagent') return true
-  if (typeof header.parentSession === 'string' && header.parentSession !== '') return true
   if (typeof header.delegationDepth === 'number' && header.delegationDepth > 0) return true
+  // GUI fork / 种子会话：parentSession 只是历史来源，它是新的一条根，不是被委派的工具面。
+  if (header.isSeeded === true) return false
+  if (typeof header.parentSession === 'string' && header.parentSession !== '') return true
   return false
 }
 

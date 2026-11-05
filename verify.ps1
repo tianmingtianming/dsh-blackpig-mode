@@ -86,11 +86,11 @@ function Find-PresetDeclaration {
 # 参与校验只会在每次安装后报假 WARN（见 $skipSizeCheck）。
 $expected = [ordered]@{
     'cordis.patch.yml'    = 36180
-    'guard-v10.mjs'       = 121315
+    'guard-v10.mjs'       = 122412
     'blackpig-roster.mjs' = 74754
-    'subtalk.mjs'         = 35140
+    'subtalk.mjs'         = 35457
     'file-info.mjs'       = 25863
-    'member-persona.mjs'  = 15054
+    'member-persona.mjs'  = 15336
     'package.json'        = 727
     'README.md'           = 0       # 仅记录最后已知尺寸（不参与校验，故置 0）
     'LICENSE'             = 1073

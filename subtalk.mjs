@@ -108,7 +108,8 @@ function warnOnceFactory(ctx) {
 /**
  * 判断一个 agent 是不是被委派出来的子会话。
  *
- * 与 guard 里的同名函数保持同一判据（三信号任一成立）。
+ * 与 guard 里的同名函数保持同一判据（四信号：origin / delegationDepth / isSeeded 取反排除 /
+ * parentSession 兜底）；fork 会话（种子会话）的 parentSession 只是历史来源，不算子会话。
  * 本模块在 preset 层注册工具（一次），但**子会话 scope 上会把它隐藏掉**（B7），
  * 并且在队友误调时给结构化拒绝 —— 因为队友的 `send_message` 走团队通道，
  * 不该被本模块接管。
@@ -117,8 +118,10 @@ function isDelegatedChild(agent) {
   const header = agent?.session?.header
   if (header === undefined || header === null || typeof header !== 'object') return false
   if (header.origin === 'subagent') return true
-  if (typeof header.parentSession === 'string' && header.parentSession !== '') return true
   if (typeof header.delegationDepth === 'number' && header.delegationDepth > 0) return true
+  // GUI fork / 种子会话：parentSession 只是历史来源，它是新的一条根，不是被委派的工具面。
+  if (header.isSeeded === true) return false
+  if (typeof header.parentSession === 'string' && header.parentSession !== '') return true
   return false
 }
 

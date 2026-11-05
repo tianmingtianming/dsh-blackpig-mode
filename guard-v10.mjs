@@ -780,16 +780,19 @@ function warnOnceFactory(ctx) {
 /**
  * 判断一个 agent 是不是被委派出来的子会话（队友 / 普通代理）。
  *
- * 判据三信号任一成立：header 的 `origin === 'subagent'`、有非空 `parentSession`、
- * `delegationDepth > 0`（`dsh-subagent` 的 `childSessionMeta()` 写入）。
+ * 判据（与 subtalk.mjs 同口径，四信号）：header 的 `origin === 'subagent'`、`delegationDepth > 0`
+ * （`dsh-subagent` 的 `childSessionMeta()` 写入）、`isSeeded` 取反排除、兜底的"有非空 `parentSession`"。
+ * fork（`isSeeded: true` 且有 parentSession）**不算**子会话：它的 parentSession 是历史来源。
  * 判错代价很高：把代理当大脑，代理就没工具干活了。
  */
 function isDelegatedChild(agent) {
   const header = agent?.session?.header
   if (header === undefined || header === null || typeof header !== 'object') return false
   if (header.origin === 'subagent') return true
-  if (typeof header.parentSession === 'string' && header.parentSession !== '') return true
   if (typeof header.delegationDepth === 'number' && header.delegationDepth > 0) return true
+  // GUI fork / 种子会话：parentSession 只是历史来源，它是新的一条根，不是被委派的工具面。
+  if (header.isSeeded === true) return false
+  if (typeof header.parentSession === 'string' && header.parentSession !== '') return true
   return false
 }
 
@@ -859,11 +862,21 @@ function teamMembershipOf(ctx, agent) {
     typeof header.parentSession === 'string' &&
     header.parentSession !== ''
 
-  // ⚠️ 先按「有没有父会话」这条硬事实拦一道：**有父会话的绝不可能是大脑**。
+  // ⚠️ 先按「有没有父会话」这条硬事实拦一道：有父会话的**通常是**子会话。
+  // **例外是 fork / 种子会话**：它的 parentSession 只是历史来源，它是新的一条根
+  // （见本文件 isDelegatedChild 里的 isSeeded 排除）。必须先把它排除，否则会被当成
+  // 子会话丢进 tryMembership，误判成 teammate/lead。
+  // 排除条件收窄为「种子会话 + 不是 subagent（无 origin）+ 无委派深度」：
+  // 真队友即使 context:"fork"（isSeeded=true）也带 origin:'subagent' 且 delegationDepth>=1，
+  // 不能被这条早退误伤（否则它会丢掉 spawn_teammate 的摘除）。
+  if (header?.isSeeded === true && header?.origin !== 'subagent' &&
+      !(typeof header?.delegationDepth === 'number' && header.delegationDepth > 0)) {
+    return undefined
+  }
   // 这样即使 agentTeams 服务整个不可用、或者宿主把 role 判错，也不会把子会话
   // 当大脑收窄。这是比 role 字符串更根本的一层。
   if (hasParent) {
-    // 有父会话 = 子会话。它要么是队友（要摘 spawn_teammate），要么是代理（不动）。
+    // 有父会话 = 通常是子会话（队友要摘 spawn_teammate，代理不动）；fork/种子会话已在上面早退。
     // 队友判定仍需要宿主的数据（谁是 team member 只有 Team journal 知道）。
     let teams
     try {

@@ -58,7 +58,7 @@ dsh.cmd plugin --profile <名> add github:tianmingtianming/dsh-blackpig-mode
 ### 2. 次选：从 Release 装（不需要 git）
 
 ```powershell
-dsh.cmd plugin --profile <名> add https://github.com/tianmingtianming/dsh-blackpig-mode/releases/download/v1.0.0/dsh-blackpig-mode-1.0.0.tgz
+dsh.cmd plugin --profile <名> add https://github.com/tianmingtianming/dsh-blackpig-mode/releases/download/v1.0.1/dsh-blackpig-mode-1.0.1.tgz
 ```
 
 ### 3. 兜底：本地 tgz（离线、或上面两条都不通时）
@@ -217,12 +217,30 @@ preset id 固定是 `blackpigmodel`，不能两个 bundle 各声明一次。会�
 ## 不是什么
 
 - **不是通用框架。** 它没有抽象层、没有插件目录、没有"接入你自己的后端"的口子。它就是一套针对 DSH 这个特定平台的声明和 5 个插件。
-- **不是插件市场里的产品。** 没有版本发布流程、没有兼容性矩阵、没有客服。`1.0.0` 是作者本地部署切出来的一个快照。
+- **不是插件市场里的产品。** 没有版本发布流程、没有兼容性矩阵、没有客服。`1.0.0` 是作者本地部署切出来的一个快照（`1.0.1` 修复了 GUI fork 会话被误判为子会话的 bug，详见下方「变更记录」）。
 - **不保证跨平台。** 见上一节最后一条。
 - **不包含记忆功能。** 本包**不写死任何第三方工具名**；别的包（如记忆插件）提供的工具不在大脑的工具面上，要放行由你自己往 `keep:` 里加。本包自己没有任何记忆、存储、检索实现。
 - **不包含 MCP 服务。** 一个都没有。
 - **不包含任何影视业务流程。** 没有分镜、没有渲染、没有素材管理。模式里的"派活"是通用的 agent 编排，跟具体行业无关。
 - **不是"更好的模型"。** 它只改工具面和人格，不改模型能力。规划者变笨的地方，它一点忙都帮不上。
+
+---
+
+## 变更记录
+
+### v1.0.1
+
+**修复：GUI fork（分叉）出来的会话被误判为子代理，导致大脑工具面被放开、人格被换成 WORKER。**
+
+- 症状：在界面上对一条黑猪会话做「分叉 / 分支」后，新会话的工具表从 25 个变成 65 个（含 `pwsh` / `read` / `write` / `edit` / `glob` / `grep`），系统提示从大脑人格变成 `You are a WORKER on a work team, not the coordinator.`，于是大脑可以自己跑命令。
+- 根因：fork 产出的会话 header 是 `isSeeded: true` + 非空 `parentSession` + **无** `origin` + `delegationDepth: 0`；而 `guard-v10.mjs` / `member-persona.mjs` / `subtalk.mjs` 三处 `isDelegatedChild()` 把「有 `parentSession`」单独当成「是子会话」，`guard` 于是对它 `release()` 卸掉收窄、`member-persona` 又把它的人格换成 WORKER。真子代理是 `origin: 'subagent'` + `delegationDepth >= 1`，两者形态不同，这是判据没区分开的地方。
+- 修法：三处 `isDelegatedChild()` 改成同一口径——`origin === 'subagent'` → true；`delegationDepth > 0` → true；`isSeeded === true` → **false**（fork 会话是新的一条根，`parentSession` 只是历史来源）；最后才兜底「有非空 `parentSession`」。另在 `guard-v10.mjs` 的 `teamMembershipOf()` 里对「种子会话 + 非 subagent + 无委派深度」提前 `return undefined`，避免它被丢进 `tryMembership` 误判成 Team 成员。
+- 不受影响：真子代理与真队友（含 `spawn_teammate(context: "fork")`——它也带 `isSeeded: true`，但同时带 `origin: 'subagent'` 与 `delegationDepth >= 1`，被排除条件放过）行为不变；根会话行为不变。
+- 已知代价：`verify.ps1` 里 `guard-v10.mjs` / `subtalk.mjs` / `member-persona.mjs` 的期望字节数已同步更新到本次实测值。
+
+### v1.0.0
+
+首个公开发布版本。
 
 ---
 
@@ -269,7 +287,7 @@ Design intent: keep the main conversation's context free of process data. The co
 
 Cost, stated plainly: the coordinator cannot see file contents. To learn what a file says it must spend another round trip. This is a deliberate trade, not a bug.
 
-Install, three ways in order of preference: `dsh.cmd plugin --profile <name> add github:tianmingtianming/dsh-blackpig-mode` (needs git); the v1.0.0 Release tarball URL (no git needed); or a local `.tgz` path after unpacking it and running `check.ps1` first. Full steps are in the Chinese section above.
+Install, three ways in order of preference: `dsh.cmd plugin --profile <name> add github:tianmingtianming/dsh-blackpig-mode` (needs git); the v1.0.1 Release tarball URL (no git needed); or a local `.tgz` path after unpacking it and running `check.ps1` first. Full steps are in the Chinese section above.
 
 `check.ps1` exit codes: **0 = READY**, **1 = NEEDS-CLEANUP** (also returned *after* a successful install — that is by design, use `verify.ps1` afterwards), **2 = BLOCKED** (no `dsh.cmd`, or the profile directory does not exist yet — initialize the profile first).
 
