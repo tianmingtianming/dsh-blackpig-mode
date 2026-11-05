@@ -58,7 +58,7 @@ dsh.cmd plugin --profile <名> add github:tianmingtianming/dsh-blackpig-mode
 ### 2. 次选：从 Release 装（不需要 git）
 
 ```powershell
-dsh.cmd plugin --profile <名> add https://github.com/tianmingtianming/dsh-blackpig-mode/releases/download/v1.0.1/dsh-blackpig-mode-1.0.1.tgz
+dsh.cmd plugin --profile <名> add https://github.com/tianmingtianming/dsh-blackpig-mode/releases/download/v1.0.2/dsh-blackpig-mode-1.0.2.tgz
 ```
 
 ### 3. 兜底：本地 tgz（离线、或上面两条都不通时）
@@ -228,6 +228,16 @@ preset id 固定是 `blackpigmodel`，不能两个 bundle 各声明一次。会�
 
 ## 变更记录
 
+### v1.0.2
+
+**修复：大脑调用自己工具面里没有的工具、被 guard 拒绝后，不作为、直接收尾。**
+
+- 症状：大脑去调一个不在它工具面上的工具（例如记忆插件注入的 `mnemon_runtime_memory`），被 `blackpig-guard` 以 `not on the coordinator's tool surface` 拒掉，之后**既不派活也不告诉用户**，直接把这一轮收尾掉。实测一例：失败发生 → **152 秒后用户不得不开口追问** → **91 秒后才改派**，总 **243.6 秒**，且**必须用户介入**才派出活来。
+- 根因：人格里没有「工具失败必须改派」这条规则；离它最近的一条只覆盖「你根本没有这个工具」这一种情形，而且被放在段尾，没有和「可以收尾 / 可以汇报」形成对立，所以模型读到的信号是「这一步不该我做」而不是「这一步还欠着用户」。
+- 修法：人格新增一段 **`A failed tool call is not a result — it is a delegation trigger`**，要求**同一个 turn 内**改派工人，并且 brief 里必须装进失败的那次原样调用与错误原文，改派之后还要说出派了什么；明确规定失败可以上报、不可以丢弃。
+- 不受影响：工具面、guard 白名单、判据逻辑均未变；只改人格文本。
+- 已知代价：`verify.ps1` 里 `cordis.patch.yml` 的期望字节数已同步更新到本次实测值。
+
 ### v1.0.1
 
 **修复：GUI fork（分叉）出来的会话被误判为子代理，导致大脑工具面被放开、人格被换成 WORKER。**
@@ -287,7 +297,7 @@ Design intent: keep the main conversation's context free of process data. The co
 
 Cost, stated plainly: the coordinator cannot see file contents. To learn what a file says it must spend another round trip. This is a deliberate trade, not a bug.
 
-Install, three ways in order of preference: `dsh.cmd plugin --profile <name> add github:tianmingtianming/dsh-blackpig-mode` (needs git); the v1.0.1 Release tarball URL (no git needed); or a local `.tgz` path after unpacking it and running `check.ps1` first. Full steps are in the Chinese section above.
+Install, three ways in order of preference: `dsh.cmd plugin --profile <name> add github:tianmingtianming/dsh-blackpig-mode` (needs git); the v1.0.2 Release tarball URL (no git needed); or a local `.tgz` path after unpacking it and running `check.ps1` first. Full steps are in the Chinese section above.
 
 `check.ps1` exit codes: **0 = READY**, **1 = NEEDS-CLEANUP** (also returned *after* a successful install — that is by design, use `verify.ps1` afterwards), **2 = BLOCKED** (no `dsh.cmd`, or the profile directory does not exist yet — initialize the profile first).
 

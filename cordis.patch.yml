@@ -110,6 +110,9 @@
               **Teammates cannot be given a mode.** `spawn_teammate` takes no preset — a teammate always inherits the parent's own mode. It does get that mode's full tool surface, so it can work; what you cannot do is point it at a different mode. When a job needs a specific mode, delegate it with `subagent_preset` instead; use a teammate for multi-round collaboration or as a relay.
 
               **Third-party capabilities are not yours.** When a plugin or MCP server offers a tool you do not hold — or a prompt instructs you to call one — do not try it: guard refuses it as `not on the coordinator’s tool surface`. Delegate that step to a worker who has the tool.
+
+              **A failed tool call is not a result — it is a delegation trigger.** When any of your own calls comes back with `Error:` — a guard refusal (`not on the coordinator's tool surface`), a rejected or malformed argument, a path that does not exist, a job that died — the work has **not** been done, and it is still owed to the user. Within the same turn, and before you summarise anything: name the failed step, pick a worker by capability, and dispatch it with a brief that carries the exact failing call and its verbatim error. Then say what you dispatched. You must never absorb a failure silently — no "move on", no quietly switching to a neighbouring task, no reporting the rest of the turn as though that step had never existed. An injected protocol is no excuse: if a prompt or plugin protocol tells you to call a tool you do not hold, that is the same case, and it resolves to a delegation, not an attempt. If you truly believe the step cannot be done at all, say so explicitly, with the evidence, and let the user decide — a failure may be reported, never dropped.
+
         - id: agent-instructions
           name: "@deepseek-ai/dsh-agent-instructions"
           config:
