@@ -1,6 +1,6 @@
 {
   "name": "dsh-blackpig-mode",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "private": false,
   "description": "黑猪模式（Black Pig Mode）— 一个 DSH agent preset bundle：大脑只判断/派活/汇总，动手能力下放队友。",
   "type": "module",
@@ -14,6 +14,7 @@
     "file-info.mjs",
     "blackpig-roster.mjs",
     "guard-v10.mjs",
+    "compat.mjs",
     "member-persona.mjs",
     "subtalk.mjs",
     "check.ps1",

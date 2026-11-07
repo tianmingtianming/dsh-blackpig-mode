@@ -72,6 +72,130 @@ export const name = 'blackpig-guard'
 /** 工具注册表必须先存在。 */
 export const inject = ['tools']
 
+/**
+ * 守卫安装状态表（可观测）—— sessionId -> 状态记录。
+ *
+ * ── 为什么必须存在这张表 ──────────────────────────────────────────────────────
+ *
+ * `tools.restrict()` 在**当时还没注册的工具名**上会直接抛错（宿主
+ * dsh-tools/lib/index.js 的 restrict()：
+ *   const known = this.view(scope).restrictableNames;
+ *   const unknown = [...allow, ...deny].filter(name => !known.has(name));
+ *   if (unknown.length > 0) throw new Error(`tools.restrict() names unknown global tool ...`);
+ * ）。历史上「改个 deny 列表插件就不启动」就是这个抛错把插件构造带崩了。
+ *
+ * 修法分两层，缺一不可：
+ *   ① **不再让它抛**：调用前先与 `view(scope).restrictableNames` 求交，
+ *      未知名单独记 error；外层再包 try/catch 兜住宿主未来的任何变化。
+ *   ② **不许假装成功**：catch 住之后「守卫没装上」这个事实必须落到一个
+ *      **可读的状态**里，而不是只打一条日志就过去 —— 日志是给人看的，
+ *      状态是给程序用的（启动自检、诊断脚本都从这里读）。
+ *
+ * ⚠️⚠️ 2026-11-06（P0-1 / P0-3）：上面「Lead 首条上下文」那条通道**不可靠**。
+ * 我们往 `decision.contexts` 追加的那条带 `required: true`，但宿主在 runtime-context
+ * 被抑制时只保留**通过 `systemPrompt.context()` 注册**的项（按 `contextByName` 查名），
+ * 我们那条不在该表里，会被整条过滤掉 —— 所以**不靠它**。
+ * 现在每一条「守卫没装上」的早退路径（读不到工具面 / restrict 与 guard 双双失败）都
+ *   · 写 `GUARD_INSTALL_STATUS`（`guardInstallStatus()` 可读），且
+ *   · `logger.error` 一条带 **session id + agent id** 的日志。
+ * 日志是不受上下文抑制影响的主通道；注入只是「没被抑制时」的额外提醒。
+ *
+ * 键用 sessionId（`agent.session.id ?? agent.id`），因为 resync 广播只带 id。
+ * 用模块级 Map 而不是闭包内 Map：同一个进程里可能有多个 preset scope 各自
+ * apply 一次，但「这个会话的守卫到底装上没有」是全局事实，不该按 apply 作用域
+ * 分裂成几份互相看不见的副本。
+ */
+const GUARD_INSTALL_STATUS = new Map()
+
+/** 一次守卫安装的结局分类。 */
+export const GUARD_STATE_ENGAGED = 'engaged'
+export const GUARD_STATE_DEGRADED = 'degraded'
+export const GUARD_STATE_UNPROTECTED = 'unprotected'
+
+/**
+ * 读一个会话的守卫安装状态（深拷贝，调用方改不坏内部记录）。
+ *
+ * 供启动自检与诊断使用：`state !== 'engaged'` 就意味着该会话的隐藏层
+ * **没有确认生效**，必须当作「无约束」对待。
+ *
+ * @param sessionId - 会话 id；缺省则返回整表快照。
+ * @returns 单条记录或 { [sessionId]: record }。
+ */
+export function guardInstallStatus(sessionId) {
+  if (typeof sessionId === 'string' && sessionId !== '') {
+    const record = GUARD_INSTALL_STATUS.get(sessionId)
+    return record === undefined ? undefined : { ...record, deny: [...record.deny], unknownNames: [...record.unknownNames] }
+  }
+  const all = {}
+  for (const [key, record] of GUARD_INSTALL_STATUS) {
+    all[key] = { ...record, deny: [...record.deny], unknownNames: [...record.unknownNames] }
+  }
+  return all
+}
+
+/**
+ * 写一条守卫安装状态（只由 sync 调用）。
+ *
+ * ⚠️ 2026-11-07 修（R17，BUG-2）：原来取不到 sessionId 时**静默 return**，调用方却
+ * 在日志里写「Status recorded as ...」—— 状态表其实是空的，启动自检 / 首条上下文
+ * 注入全都读不到，日志与实际相反。现在返回**是否真的写进去了**，调用方据此选文案，
+ * 绝不宣称「已记录」一件没发生的事。安全取向不变：该会话仍按 unconstrained 对待。
+ *
+ * @param sessionId - 会话 id。
+ * @param record - 状态记录。
+ * @returns {boolean} true = 已写入状态表；false = 没有 session id，什么都没记。
+ */
+function recordGuardInstallStatus(sessionId, record) {
+  if (typeof sessionId !== 'string' || sessionId === '') return false
+  GUARD_INSTALL_STATUS.set(sessionId, record)
+  return true
+}
+
+/**
+ * 从 agent scope 读 `restrictableNames`（`restrict()` 校验名字时用的同一个集合）。
+ *
+ * 为什么不用别的来源：`view(scope).restrictableNames` 是**未经过滤**的完整继承集
+ * （全局层 + 祖先层，不含本层），与 restrict() 内部校验逐字一致 —— 拿它求交，
+ * 提交上去的名字就不可能触发 unknown 抛错。
+ *
+ * @param tools - agent.ctx.tools。
+ * @param agent - 目标 agent（作为 view 的 scope）。
+ * @returns Set<string> 或 undefined（当前版本没有这条路）。
+ */
+function restrictableNamesOf(tools, agent) {
+  if (tools === undefined || tools === null || typeof tools.view !== 'function') return undefined
+  let view
+  try {
+    view = tools.view(agent)
+  } catch (error) {
+    ctxSafeError(`reading tools.view(scope) threw: ${error instanceof Error ? error.message : String(error)}`)
+    return undefined
+  }
+  const names = view?.restrictableNames
+  if (names === undefined || names === null || typeof names[Symbol.iterator] !== 'function') return undefined
+  const set = new Set()
+  for (const name of names) {
+    if (typeof name === 'string' && name !== '') set.add(name)
+  }
+  return set
+}
+
+/**
+ * 在没有 ctx 的辅助函数里记 error（restrictableNamesOf 这类纯函数用）。
+ *
+ * 只写 console：这些函数可能在任何 ctx 之外被调用（启动自检、单测）。
+ * 真实安装路径上的错误由调用方带 ctx.logger 再记一遍完整上下文。
+ *
+ * @param message - 完整消息。
+ */
+function ctxSafeError(message) {
+  try {
+    console.error(`blackpig-guard: ${message}`)
+  } catch {
+    // 不允许抛。
+  }
+}
+
 /** 本守卫所属的 preset id。 */
 const DEFAULT_PRESET_ID = 'blackpigmodel'
 
@@ -163,8 +287,8 @@ const DEFAULT_KEEP = [
   // YAML 里也给 guard 传了同名 `keep` 项，但这里仍要写进默认表 —— 否则
   // 自检（DEFAULT_KEEP 与 KEEP 比对）覆盖不到它，两处漂了没人发现。
   //
-  // ⚠️ blackpig-roster 的插件行必须排在 blackpig-guard **之前**：
-  // keep 过滤用的是 guard 初始化时的 available 快照，排后面会被静默剔掉。
+  // 插件行顺序不影响工具面：旧版曾有「排后面会被静默剔掉」的机制，已随
+  // pruneAbsentTeamTools() 改为只观察、不改 keep 而作废（见 cordis.patch.yml 更正段）。
   'subagent_preset',
 
   // ── 团队协作（Agent Teams）──
@@ -189,8 +313,9 @@ const DEFAULT_KEEP = [
   'ask_user_question',
   'todo_write',
   'present',
-  // `exit_plan_mode` 必须保留：preset 里挂了 planning 组，而计划模式一旦进入就必须
-  // 能退出。若把它摘掉，用户把大脑切到计划模式后会被**永久困住**（进得去出不来）。
+  // `exit_plan_mode` is registered conditionally by dsh-plan-mode (only once plan mode
+  // has been entered). Keeping it in the retain set does not make it appear — it only
+  // prevents the guard from trimming it away in the steps where it IS registered.
   'exit_plan_mode',
 
   // ── 长期目标（2026-10-31 加回，用户决定）──
@@ -431,6 +556,8 @@ function looksSpilled(text) {
  * 判据：返回值本来就只有几十字节，裁了只会增加噪音；或者返回结构不是纯文本，
  * 按字节截断会破坏语义（`read_image` 返回的是图像块）。
  */
+// exit_plan_mode stays here even though it is conditionally registered: harmless today,
+// and correct again if a future DSH registers it unconditionally.
 const TRIM_EXEMPT_TOOLS = new Set([
   'send_message', // 13 B
   'wait_agent', // 18 B
@@ -573,11 +700,20 @@ function byteOffsets(text) {
     if (unit < 0x80) bytes += 1
     else if (unit < 0x800) bytes += 2
     else if (unit >= 0xd800 && unit <= 0xdbff) {
-      // 高位代理：与其后的低位代理合成一个 4 字节码点。
-      bytes += 4
+      // 高位代理：其后紧跟低位代理时合成一个 4 字节码点；**孤立**高位代理由
+      // `Buffer.from(str, 'utf8')` 编码成 3 字节 U+FFFD —— 不能记 4 字节。
+      const next = i + 1 < text.length ? text.charCodeAt(i + 1) : 0
+      bytes += next >= 0xdc00 && next <= 0xdfff ? 4 : 3
     } else if (unit >= 0xdc00 && unit <= 0xdfff) {
-      // 低位代理：字节数已由前一个高位代理计入。
-      bytes += 0
+      // ⚠️⚠️ 2026-11-07 修（R11，BUG-2）：原来这里记 **0 字节**（以为字节数已由前一个
+      // 高位代理计入）。可**孤立**低位代理由 `Buffer.from(str, 'utf8')` 编码成 3 字节
+      // U+FFFD，于是 `cum[i]` 不再是真实字节偏移，`assembleTrim` 拿 `cum` 定位头尾
+      // 就会切错（实测 120/40 预算产出 120/43 字节）。这里按 Buffer 的真实编码记 3 字节。
+      // 可证伪判据：`byteOffsets('\uDC00abc')` 必须是 `[0,3,4,5,6]`（Buffer 为 6 字节）。
+      // 注意：**成对**的低位代理字节数已由前一个高位代理计入，这里必须记 0；
+      // 只有前面不是高位代理的**孤立**低位代理才记 3。
+      const prev = i > 0 ? text.charCodeAt(i - 1) : 0
+      bytes += prev >= 0xd800 && prev <= 0xdbff ? 0 : 3
     } else bytes += 3
     cum[i + 1] = bytes
   }
@@ -601,12 +737,52 @@ function assembleTrim(buf, cum, notice, headChars, tailChars) {
   const head = sliceCharsUtf8(buf, 0, headBytes)
   const tail = headBytes >= tailBytesStart ? '' : sliceCharsUtf8(buf, tailBytesStart, buf.length)
   const out = head + notice + tail
-  return { text: out, chars: out.length, bytes: Buffer.byteLength(out, 'utf8') }
+  // R11（BUG-1）：把两个切点的字节偏移一并带出，供调用方做**切点邻域**的 U+FFFD 检查
+  // （不再扫输出全文 —— 扫全文会命中源文本自带的 U+FFFD）。
+  return {
+    text: out,
+    chars: out.length,
+    bytes: Buffer.byteLength(out, 'utf8'),
+    headEndBytes: headBytes,
+    tailStartBytes: tailBytesStart,
+  }
 }
 
 /** 与 `cum` 配套的字符总数（`cum` 长度 − 1）。 */
 function bufChars(cum) {
   return cum.length - 1
+}
+
+/**
+ * ⚠️⚠️ 2026-11-07 修（R11，BUG-1）：判断**这次裁剪本身**是否在切点上切坏了字符。
+ *
+ * 原判据是 `out.text.includes('\uFFFD')` —— 扫**输出全文**。源文本自带 U+FFFD 时
+ * （GBK/无效 UTF-8 有损解码、JSON 里的 `\ufffd`、上游 spill 已插的替换符）必然命中，
+ * 于是整块放弃裁剪、原文放行，**硬顶被绕过**（实测 600001 字符、首字符 U+FFFD，
+ * cap=52000 与 cap=200000 均 skipped）。而且文案把原因错报成「边界计算错误」。
+ *
+ * 现在只看**切点**本身，两条判据都不关心源文本里原本有没有替换符：
+ *   · 切点字节若落在 UTF-8 续字节（`10xxxxxx`）上 → 真的切进了字符中间；
+ *   · 被保留的字节解码后重新编码必须逐字节相等 → 解码没有丢字节/补替换符。
+ *
+ * 正常源文本（含自带 U+FFFD）两条都不成立，因此不再跳过、硬顶照常生效。
+ *
+ * @param buf - 原文 UTF-8 字节。
+ * @param out - `assembleTrim` 的返回值（含 headEndBytes / tailStartBytes）。
+ * @returns 这次的切点是否真的切坏了字符。
+ */
+function cutIntroducesReplacement(buf, out) {
+  const headEnd = out.headEndBytes
+  const tailStart = out.tailStartBytes
+  const usedTail = headEnd < tailStart
+  for (const at of usedTail ? [headEnd, tailStart] : [headEnd]) {
+    if (at > 0 && at < buf.length && (buf[at] & 0xc0) === 0x80) return true
+  }
+  const keptBytes = usedTail
+    ? Buffer.concat([buf.subarray(0, headEnd), buf.subarray(tailStart)])
+    : buf.subarray(0, headEnd)
+  const roundTrip = Buffer.from(keptBytes.toString('utf8'), 'utf8')
+  return !roundTrip.equals(keptBytes)
 }
 
 /**
@@ -650,17 +826,122 @@ function trimContent(content, toolName, maxChars, teamMode = false) {
   }
   if (total <= maxChars) return undefined
 
-  // ⚠️ 混合内容（含 image 等非文本块）**一律不裁**。
+  // ⚠️⚠️ 2026-11-07 修（R13，BUG-1）：混合内容**仍然不删块**，但**不能再跳过硬顶**。
   //
-  // 原实现只累加 text 块，然后把 `content` 替换成「只有 text」的新数组 ——
-  // 结果是**图片块被静默删除**（独立审计实测：`[text3000, image, text4000]`
-  // 输出只剩 text）。这比「不裁」危险得多：模型以为看到了完整结果。
+  // 上一版是 `if (hasNonText) return { skipped: ... }`。调用方拿到 skipped 只记一条
+  // error 就 `return decision` —— **原文整块放行**。实测
+  // `[{text:'a'*900000},{type:'image'}]`：0 字符被裁，900k 字符全量进上下文，
+  // 硬顶对「含一个 image 块的大结果」完全失效（日志还看起来处理过了）。
   //
-  // 而且图片的体量不该用字节衡量，该用 token 计价 —— 宿主 spill-policy 的
-  // `priceImages()` 正是干这个的。所以这里直接退出，把决策权留给下游。
-  //
-  // ⚠️ 但不许**静默**退出（N1 的同一条原则）：返回 `skipped` 让调用方记一条日志。
-  if (hasNonText) return { skipped: '结果里含非文本块（图片等），按字节截断会破坏语义' }
+  // 现在的取向：
+  //   · **只裁纯文本块，非文本块原位原样不动**（绝不删除、绝不移动 image 等块）；
+  //   · 裁完仍超硬顶（或说明本身装不下）→ 退化为「保留非文本块 + 极短文本 +
+  //     明确说明」，并**保证文本总量 ≤ maxChars**（字符量纲，与本模块一致）；
+  //   · **绝不**再走「skipped → 原样放行全文」。
+  // 正常路径（无超顶）与纯文本超顶路径都不经过这里，输出逐字节不变。
+  if (hasNonText) {
+    const textIndexes = []
+    for (let i = 0; i < content.length; i += 1) {
+      const block = content[i]
+      if (block !== null && typeof block === 'object' && typeof block.text === 'string') textIndexes.push(i)
+    }
+    if (textIndexes.length === 0) return { skipped: '结果里没有可裁剪的文本块' }
+
+    const mixedJoined = textIndexes.map((i) => content[i].text).join('')
+    const mixedSpillHandled = looksSpilled(mixedJoined)
+    const limit = Math.max(0, Math.floor(maxChars))
+    const mixedNotice = buildTrimNotice(toolName, total, maxChars, mixedSpillHandled, teamMode)
+
+    // 只取安全前缀：退掉被切开的**高位代理**，不新造替换符。
+    const safePrefix = (text, count) => {
+      let out = text.slice(0, Math.max(0, Math.floor(count)))
+      if (out.length > 0) {
+        const last = out.charCodeAt(out.length - 1)
+        if (last >= 0xd800 && last <= 0xdbff) out = out.slice(0, -1)
+      }
+      return out
+    }
+    // 只取安全后缀：切点落在**低位代理**上时右移一位（宁可少留一个 code unit）。
+    const safeSuffix = (text, count) => {
+      let start = Math.max(0, text.length - Math.max(0, Math.floor(count)))
+      if (start > 0 && start < text.length) {
+        const unit = text.charCodeAt(start)
+        if (unit >= 0xdc00 && unit <= 0xdfff) start += 1
+      }
+      return text.slice(start)
+    }
+    // 单个文本块按 allowance 保留「头 + … + 尾」；返回长度**必 ≤ allowance**。
+    const trimOne = (text, allowance) => {
+      const room = Math.max(0, Math.floor(allowance))
+      if (room >= text.length) return text
+      const SEP = '…'
+      if (room <= SEP.length) return safePrefix(text, room)
+      const body = room - SEP.length
+      const head = Math.ceil(body * 0.75)
+      return safePrefix(text, head) + SEP + safeSuffix(text, body - head)
+    }
+
+    // 说明 + 至少 1 字符正文都装不下 → 极简兜底：文本块清空，只留一条**截断到上限**的
+    // 明确说明。文本总量 = 说明长度 ≤ maxChars，非文本块全部原样保留。
+    if (mixedNotice.length >= limit) {
+      const brief = safePrefix(
+        `[blackpig-guard] 该 ${toolName} 结果共 ${total} 字符，超过 ${limit} 字符上限；` +
+          '正文已省略，非文本块（如图片）原样保留。',
+        limit,
+      )
+      const keptBlocks = content.map((block) =>
+        block !== null && typeof block === 'object' && typeof block.text === 'string' ? { ...block, text: '' } : block,
+      )
+      keptBlocks.push({ type: 'text', text: brief })
+      return {
+        content: keptBlocks,
+        originalChars: total,
+        originalBytes: totalBytes,
+        keptChars: brief.length,
+        keptBytes: Buffer.byteLength(brief, 'utf8'),
+        spillHandled: mixedSpillHandled,
+      }
+    }
+
+    // 正文预算 = 上限 − 说明；按各文本块长度**按比例**分配（先到先得、剩余预算顺延），
+    // 逐块只保留头尾。按**实际拼接长度**记账，因此总保留字符数必然 ≤ 预算。
+    const bodyBudgetMixed = limit - mixedNotice.length
+    const trimmedTexts = []
+    let budgetLeft = bodyBudgetMixed
+    let charsLeft = total
+    for (const index of textIndexes) {
+      const text = content[index].text
+      const allowance = charsLeft > 0 ? Math.min(text.length, Math.floor((text.length * budgetLeft) / charsLeft)) : 0
+      const trimmed = trimOne(text, allowance)
+      trimmedTexts.push(trimmed)
+      budgetLeft -= trimmed.length
+      charsLeft -= text.length
+    }
+
+    let cursor = 0
+    let keptChars = mixedNotice.length
+    let keptBytes = Buffer.byteLength(mixedNotice, 'utf8')
+    const keptBlocks = content.map((block) => {
+      if (block !== null && typeof block === 'object' && typeof block.text === 'string') {
+        const text = trimmedTexts[cursor]
+        cursor += 1
+        keptChars += text.length
+        keptBytes += Buffer.byteLength(text, 'utf8')
+        return text === block.text ? block : { ...block, text }
+      }
+      // 非文本块（image 等）**原位原样**保留，绝不删除、绝不移动。
+      return block
+    })
+    keptBlocks.push({ type: 'text', text: mixedNotice })
+    return {
+      content: keptBlocks,
+      originalChars: total,
+      originalBytes: totalBytes,
+      keptChars,
+      keptBytes,
+      spillHandled: mixedSpillHandled,
+    }
+  }
 
   const texts = content.filter((b) => b !== null && typeof b === 'object' && typeof b.text === 'string')
   if (texts.length === 0) return { skipped: '结果里没有可裁剪的文本块' }
@@ -679,13 +960,54 @@ function trimContent(content, toolName, maxChars, teamMode = false) {
   const notice = buildTrimNotice(toolName, total, maxChars, spillHandled, teamMode)
   const noticeChars = notice.length
 
-  // 正文预算 = 上限 − 说明。核算之后**不再反悔**：只允许"裁得更狠"，不允许"放行原文"。
-  const bodyBudget = Math.max(64, maxChars - noticeChars)
-  if (bodyBudget <= 64) {
+  // 正文预算 = 上限 − 说明。核算之后**不再反悔**：只允许裁得更狠，不允许放行原文。
+  //
+  // ⚠️⚠️ 2026-11-07 修（R10，#4）：原来写死 Math.max(64, …) 并以 <= 64 才放弃，
+  // 把「说明 + 最小正文」真正装不下的判据误扩大到所有 budget <= 64 的中等 cap：
+  // · maxChars=250、说明约 200 字符时明明装得下（正文预算约 50），却被判「塞不进」；
+  // · maxChars=1 时 bodyBudget 被抬到 64，同样走进「整块放行原文」。
+  // 现在按实际装配预算判定：说明 + 头/尾各至少 1 字符（MIN_BODY_CHARS = 2）装得下
+  // 就正常裁；只有真的装不下才走极简兜底。
+  // 注意：极简兜底也绝不把原文整块放行 —— 那会突破硬顶（短 cap 下尤其明显）。
+  // 它按 maxChars 只取头尾、不塞说明，保证 out.chars <= maxChars；正常 cap 仍走原路径。
+  const MIN_BODY_CHARS = 2
+  const bodyBudget = maxChars - noticeChars
+  if (bodyBudget < MIN_BODY_CHARS) {
+    // 说明无论如何塞不进去。仍必须守住硬顶：只保留头尾（各取若干字符），不附说明。
+    const tinyBudget = Math.max(0, Math.floor(maxChars))
+    if (tinyBudget < 1) {
+      return {
+        skipped: `兜底上限 ${maxChars} 字符连一个字符都放不下，本次不做替换（原文超出硬顶 ${totalChars - maxChars} 字符）`,
+        spillHandled,
+      }
+    }
+    // maxChars 是 UTF-16 字符量纲：直接按 code unit 切，并退掉可能被切开的高位代理。
+    let tinyText = joined.slice(0, tinyBudget)
+    const lastUnit = tinyText.length > 0 ? tinyText.charCodeAt(tinyText.length - 1) : 0
+    if (lastUnit >= 0xd800 && lastUnit <= 0xdbff) tinyText = tinyText.slice(0, -1)
+    // 注意：极端 cap（如 1）撞上开头是一个代理对（emoji）时，tinyText 可能为空 ——
+    // 那也**不是**放弃的理由：放弃会让调用方原样放行全文，反而突破硬顶。
+    // 此时返回空正文（长度 0 <= maxChars），宁可这一条什么都没留下，也不越过上限。
+    // ⚠️⚠️ 2026-11-07 修（R11，BUG-1 同病）：这里原来还有 `|| tinyText.includes('\uFFFD')`。
+    // 那判据扫的是**整段极简正文**而不是切点：源文本自带 U+FFFD（GBK/无效 UTF-8 有损解码、
+    // JSON 里的 `\ufffd`、上游 spill 已插的替换符）必然命中 → 直接放弃极简裁剪、原文放行，
+    // 短 cap（1/2/5/10/64/100/250）下的硬顶被整块绕过。
+    // 极简裁剪只按 code unit 取前缀、并退掉被切开的高位代理，**不会**新造替换符；源自带的
+    // U+FFFD 是数据本身的形状，不是「边界计算错误」，不能当放弃理由。现在只保留「没变小」。
+    if (tinyText.length >= totalChars) {
+      return {
+        skipped:
+          `裁剪说明本身就有 ${noticeChars} 字符，连 ${maxChars} 字符的兜底上限都装不下；` +
+          '且极简裁剪也无法满足硬顶/变小不变量，本次不做替换',
+        spillHandled,
+      }
+    }
     return {
-      skipped:
-        `裁剪说明本身就有 ${noticeChars} 字符，塞不进 ${maxChars} 字符的兜底上限；` +
-        '为不丢信息本次放行原文，请调大 maxResultChars',
+      content: [{ type: 'text', text: tinyText }],
+      originalChars: total,
+      originalBytes: totalBytes,
+      keptChars: tinyText.length,
+      keptBytes: Buffer.byteLength(tinyText, 'utf8'),
       spillHandled,
     }
   }
@@ -708,14 +1030,19 @@ function trimContent(content, toolName, maxChars, teamMode = false) {
     // ⚠️ 这里就是 N1 的原始现场：一次算术分配 + 边界回退会**放大**几个字节，
     // 原实现在这里直接 `return undefined`（整块放行）。现在改成**继续收紧**。
     // 预算单位是**字符**（与上限同量纲），落地时由 `cum` 换成字节偏移。
-    const best = largestMonotonic(128, bodyBudget, (b) => {
+    // ⚠️ R10 #4（同类固定下限）：二分下界原来写死 128。bodyBudget 较小时
+    // （例如 maxChars=250、说明约 200 → 预算约 50），搜索区间 [128, 50] 为空，
+    // best=127 < 128 直接判失败。这里把下界收敛：正常 cap（bodyBudget >= 128）
+    // 仍是 128，输出逐字节不变；小 cap 从 MIN_BODY_CHARS 起真正开始收紧。
+    const searchFloor = bodyBudget >= 128 ? 128 : MIN_BODY_CHARS
+    const best = largestMonotonic(searchFloor, bodyBudget, (b) => {
       const probe = split(b)
       return assembleTrim(buf, cum, notice, probe.head, probe.tail).chars <= maxChars
     })
-    if (best < 128) {
+    if (best < searchFloor) {
       return {
         skipped:
-          `把正文压到 128 字符预算仍然超过 ${maxChars} 字符上限（说明文字占 ${noticeChars} 字符）`,
+          `把正文压到 ${searchFloor} 字符预算仍然超过 ${maxChars} 字符上限（说明文字占 ${noticeChars} 字符）`,
         spillHandled,
       }
     }
@@ -730,8 +1057,46 @@ function trimContent(content, toolName, maxChars, teamMode = false) {
       spillHandled,
     }
   }
-  if (out.text.includes('\uFFFD')) {
-    return { skipped: '切点产生了 U+FFFD（字符边界计算错误），本次放行原文', spillHandled }
+  // ⚠️⚠️ 2026-11-07 修（R11，BUG-1）：原来这里是 `out.text.includes('\uFFFD')`，
+  // 扫的是**输出全文** —— 源文本自带 U+FFFD 时必然命中，整块放弃裁剪、原文放行，
+  // 硬顶被绕过，文案还把原因错报成「边界计算错误」。现在只查切点（见
+  // cutIntroducesReplacement）：源自带的 U+FFFD 照常裁，只有真把字符切开才处理。
+  //
+  // 真的切坏了也不能整块放行（那等于突破硬顶）：先换更短的安全切点重试，再退到
+  // 「只留头部合法前缀」。只有连一个字符都放不下时才返回 skipped。
+  if (cutIntroducesReplacement(buf, out)) {
+    let safe = null
+    for (let probe = Math.floor(budget / 2); probe >= MIN_BODY_CHARS; probe = Math.floor(probe / 2)) {
+      const part = split(probe)
+      const cand = assembleTrim(buf, cum, notice, part.head, part.tail)
+      if (cand.chars <= maxChars && !cutIntroducesReplacement(buf, cand)) {
+        safe = cand
+        break
+      }
+    }
+    if (safe === null) {
+      // 最后一道：只保留头部合法前缀。`sliceCharsUtf8` 只会把切点退到字符边界，
+      // 因此这条路径**不需要**再问切点判定 —— 也绝不能在这里回头 skip（skip 会让调用方
+      // 原样放行全文，硬顶照样被突破）。宁可这条结果只剩一个短前缀，也不越过上限。
+      const headOnly = Math.max(0, Math.floor(maxChars) - noticeChars)
+      safe = assembleTrim(buf, cum, notice, headOnly, 0)
+    }
+    // 兜底路径同样必须自证「不超顶」：`cum` 在代理对中间的取值会落到整字符之后，
+    // 头部按字符预算切出来可能比预算多 1 个 code unit。这里退到极简前缀（不附说明），
+    // 与 `bodyBudget` 不足时的极简路径同口径 —— 绝不把这一步变成新的超顶通道。
+    if (safe.chars > maxChars) {
+      let prefix = joined.slice(0, Math.max(0, Math.floor(maxChars)))
+      const lastUnit = prefix.length > 0 ? prefix.charCodeAt(prefix.length - 1) : 0
+      if (lastUnit >= 0xd800 && lastUnit <= 0xdbff) prefix = prefix.slice(0, -1)
+      safe = {
+        text: prefix,
+        chars: prefix.length,
+        bytes: Buffer.byteLength(prefix, 'utf8'),
+        headEndBytes: 0,
+        tailStartBytes: 0,
+      }
+    }
+    out = safe
   }
   return {
     content: [{ type: 'text', text: out.text }],
@@ -758,23 +1123,71 @@ function trimContent(content, toolName, maxChars, teamMode = false) {
 function withAdditionalContexts(next, upstream) {
   const extra = upstream?.additionalContexts
   if (Array.isArray(extra) && extra.length > 0) {
-    return { ...next, additionalContexts: extra }
+    // ⚠️ 2026-11-07 修（R9，#5）：原来是 `{ ...next, additionalContexts: extra }` ——
+    // 只搬 additionalContexts，**上游 decision 的其余自有字段全部丢掉**。上游 accept 若还带
+    // 第三个自有字段（别的插件挂在 decision 上的元信息），裁剪一次就静默消失。
+    //
+    // 现在反过来：以**上游 decision 为底**，只覆盖本模块真正动过的两把键 ——
+    // `content`（裁过的正文）与 `kind`（沿用 next 的结论）。`additionalContexts` 随展开
+    // 原样保留（`extra` 本来就是上游那个数组的引用），无需再写一遍。
+    // 无额外 contexts 时仍原样返回 `next`，正常路径逐字节不变。
+    return { ...upstream, kind: next.kind, content: next.content }
   }
   return next
 }
 
-/** 一个每次进程只警告一次的记录器。 */
+/**
+ * 一个**按作用域**只警告一次的记录器。
+ *
+ * ⚠️ 2026-11-07 修（R17，BUG-1）：去重键原来只有**整条消息串**，没有 agent 作用域。
+ * 两个会话同因失败时消息文本一样 → 只留 1 条日志，第二个受害会话的失败被整条吞掉，
+ * 而且那条 warn 也读不出受害者是谁。subtalk（R15）/ member-persona（R13b2）已修过
+ * 同一个 bug，guard 这里补齐：
+ *   · `scopeKey` 给定时（agent 相关告警传 `agentScopeKeyOf(agent)`），不同 agent 各一条；
+ *   · `scopeKey` 缺省时（配置类 / 全局告警），行为与改前逐字节一致。
+ * 同一个 agent 的重复故障仍只记一条，不会刷屏。
+ */
 function warnOnceFactory(ctx) {
   const seen = new Set()
-  return (message) => {
-    if (seen.has(message)) return
-    seen.add(message)
+  return (message, scopeKey) => {
+    const key =
+      scopeKey === undefined || scopeKey === null || scopeKey === ''
+        ? message
+        : `${scopeKey}\u0000${message}`
+    if (seen.has(key)) return
+    seen.add(key)
     try {
       ctx.logger?.warn?.(`blackpig-guard: ${message}`)
     } catch {
       // 日志通道不可用不能反过来炸掉会话。
     }
   }
+}
+
+/**
+ * 稳定的「这一个 agent」标识，用作 warnOnce 的去重作用域。
+ *
+ * 优先 `agent.session.id`（同一会话在整个生命周期里唯一），取不到再退 `agent.id`，
+ * 都没有才回落到一个**不可能撞上真 id** 的占位串 —— 那种情况下宁可多记一条，
+ * 也不要因为得到 `undefined` 把互不相干的 agent 合并进同一个桶。
+ *
+ * @param agent - 目标 agent。
+ * @returns 非空字符串。
+ */
+function agentScopeKeyOf(agent) {
+  try {
+    const sessionId = agent?.session?.id
+    if (typeof sessionId === 'string' && sessionId !== '') return `session:${sessionId}`
+  } catch {
+    // 读 session.id 抛错，继续试 agent.id。
+  }
+  try {
+    const agentId = agent?.id
+    if (typeof agentId === 'string' && agentId !== '') return `agent:${agentId}`
+  } catch {
+    // 连 agent.id 都读不出：只能退到占位串。
+  }
+  return 'agent:?'
 }
 
 /**
@@ -1081,14 +1494,12 @@ function fallbackToolNames(ctx) {
 // （2026-10-31）。它们只服务于「大脑自己 grep」这一条路，工具砍掉后是死代码。
 // 想看文件在哪、有多大，用 `file_info`；想搜内容，派代理。
 
-
 // `containsRealGlob()` 已随 `grep` 删除（2026-11-02）——
 // 它唯一的调用点在 grep 的 path 判据里，而 grep 已于 2026-10-31 移出保留集。
 // 留着它等于让下一个人以为「还有东西在做 glob 判据」。
 
 // `warnIsRepoWideLookupFailure()` 已随 `grep` 删除（2026-10-31）——
 // 它唯一的用途是提示「grep 的 cwd 判据失效」，而那条判据本身已经不在了。
-
 
 /** 规范化 preset id：只接受非空字符串。 */
 function normalizePresetId(value) {
@@ -1133,7 +1544,8 @@ function ownerPresetId(ctx, agent, warn) {
   if (typeof live === 'string') return live
   if (live === PRESET_UNKNOWN) {
     warn(
-      'could not read which preset an agent is composed with; falling back to the preset recorded when its session was created (the live binding is the authority)',
+      `could not read which preset an agent is composed with (scope=${agentScopeKeyOf(agent)}); falling back to the preset recorded when its session was created (the live binding is the authority)`,
+      agentScopeKeyOf(agent),
     )
   }
   return normalizePresetId(agent?.session?.header?.agentPreset)
@@ -1247,6 +1659,32 @@ export function apply(ctx, config) {
 
   const warn = warnOnceFactory(ctx)
 
+  /**
+   * 日志统一出口（2026-11-07 修 R6，B-5）。
+   *
+   * 本文件已经论证过「logger 可能恒抛」（见 warnOnceFactory 与 system-prompt 注入那两处），
+   * 但此前只有那两处包了 try —— 其余调用点一旦 logger 抛错，会从 waterfall / 事件监听器
+   * 里逃出去；更严重的是 `sync()` 里任何一条日志抛错都会在 `restrict()` / `guard()`
+   * 安装**之前**中断 sync，留下 fail-open 且没有任何东西能记下来。
+   *
+   * 所以全文件的 `ctx.logger` 调用统一走这两个 helper：日志内容与触发时机不变，
+   * 只保证日志失败绝不改变业务结论，也绝不打断 restrict/guard 的安装。
+   */
+  const logError = (message) => {
+    try {
+      ctx.logger?.error?.(message)
+    } catch {
+      // 日志通道不可用不能反过来炸掉会话。
+    }
+  }
+  const logInfo = (message) => {
+    try {
+      ctx.logger?.info?.(message)
+    } catch {
+      // 同上：日志失败不得影响业务结论。
+    }
+  }
+
   // ── 阈值解析：配置优先，否则用默认 ──
   // read / grep 的三条阈值（readLimitMax / exploreBudget / exploreTotalBudget）
   // 已随工具一起删除，理由见文件顶部那段注释。
@@ -1355,8 +1793,120 @@ export function apply(ctx, config) {
   const pollingCount = new WeakMap()
 
   const keyOf = (agent) => {
-    const id = agent?.session?.id ?? agent?.id
+    // ⚠️⚠️ 2026-11-07 修（R18a，BUG-1）：两次读取各自兜错，**绝不抛出**。
+    // `session.id` 可能是 throwing getter（会话半拆 / 宿主实现变化），旧实现把两次读取
+    // 放在同一个 `??` 表达式里 —— 第一段一抛，整个 sync() 就在装 restrict/guard **之前**
+    // 中断，被 agent/created 的外层 catch 吞成一条 "NOT narrowed"，保护完全没装。
+    // 与 `agentScopeKeyOf` / `statusKeysFor` / `resync` 同口径：抛错只影响这一个来源。
+    let id
+    try {
+      id = agent?.session?.id
+    } catch {
+      // session.id 读不到 → 退到 agent.id（下面统一判空）。
+      id = undefined
+    }
+    if (id === undefined || id === null) {
+      try {
+        id = agent?.id
+      } catch {
+        // 两个标识都读不到：返回 undefined，由调用方按「没有 session id」处理。
+        id = undefined
+      }
+    }
     return typeof id === 'string' && id !== '' ? id : undefined
+  }
+
+  /**
+   * ⚠️ 2026-11-07 修（R6，B-1）：记下**建状态时实际用的 key**。
+   *
+   * 只在 disposed 时重算 `keyOf` 不够：session 被拆掉后 `keyOf` 已退到 `agent.id`，
+   * 再也算不出当初那个 `session.id`。所以写状态时就把 key 记账：
+   *   · 按 agent 对象（WeakMap，不延长生命周期）；
+   *   · 按 agent.id（Map；disposed 时清掉，只存字符串不会悬空）。
+   * 这样即使 disposed 的事件载荷是另一个对象、只剩 id 相同，也能删到真正的状态键。
+   */
+  const statusKeysOfAgent = new WeakMap()
+  const statusKeysOfAgentId = new Map()
+  const rememberStatusKey = (agent, key) => {
+    if (agent === undefined || agent === null || typeof key !== 'string' || key === '') return
+    const add = (map, mapKey) => {
+      let keys = map.get(mapKey)
+      if (keys === undefined) {
+        keys = new Set()
+        map.set(mapKey, keys)
+      }
+      keys.add(key)
+    }
+    try {
+      add(statusKeysOfAgent, agent)
+    } catch {
+      // WeakMap 只接受对象；agent 不是对象时按 id 记账即可。
+    }
+    try {
+      const agentId = agent?.id
+      if (typeof agentId === 'string' && agentId !== '') add(statusKeysOfAgentId, agentId)
+    } catch {
+      // 取不到 agent.id 不影响写状态。
+    }
+  }
+  /** 写状态 + 记住这次用的 key（只用于 disposed 时精确回收）。 */
+  const recordStatus = (agent, sessionId, record) => {
+    const recorded = recordGuardInstallStatus(sessionId, record)
+    rememberStatusKey(agent, sessionId)
+    return recorded
+  }
+  /**
+   * 收集「该 agent 在状态表里可能用过的全部 key」—— 释放 / 切走时精确删除条目用。
+   *
+   * ⚠️ 2026-11-07（R9，优化 6）：这段候选集逻辑原先在 `sync()` 的「切走 preset」分支
+   * 与 `agent/disposed` 监听里**逐字重复**了两份（各自还带着一套几乎相同的注释）。
+   * 任何一侧漏改都会让状态表留下删不掉的条目 —— R6 的 B-1 就是这么来的。抽成一份，两处同源。
+   *
+   * 四个来源各自独立、任何一步失败都不影响其它候选：
+   *   ① 建状态时记下的那把 key（`statusKeysOfAgent`；会话被拆掉后只有它还知道原键）；
+   *   ② `keyOf(agent)` 自己的结果（与它的语义保持同源）；
+   *   ③ `agent.session.id`（会话还在时的首选键）；
+   *   ④ `agent.id`（会话被拆掉后 `keyOf` 退化到的键）+ 按 id 记账的原键。
+   * 按 id 记账的原键在收集后清掉，避免 `statusKeysOfAgentId` 无界增长。
+   *
+   * @param agent - 目标 agent（对象键记账不延长其生命周期）。
+   * @returns {Set<string>} 候选状态键；所有来源都读不到时为空集。
+   */
+  const statusKeysFor = (agent) => {
+    const statusKeys = new Set()
+    try {
+      // 建状态时记下的那把 key —— session 已被拆掉时，只有它还知道原键。
+      for (const remembered of statusKeysOfAgent.get(agent) ?? []) statusKeys.add(remembered)
+    } catch {
+      // 记账读不到不影响清理。
+    }
+    try {
+      // `keyOf` 自己的结果也收进来：语义与它保持同源。
+      const keyed = keyOf(agent)
+      if (keyed !== undefined) statusKeys.add(keyed)
+    } catch {
+      // 取不到不影响清理，下面几个候选继续尝试。
+    }
+    try {
+      // 候选一：`keyOf` 的首选键 —— 会话还在时就是它。
+      const sessionId = agent?.session?.id
+      if (typeof sessionId === 'string' && sessionId !== '') statusKeys.add(sessionId)
+    } catch {
+      // 读 session.id 抛错不影响清理。
+    }
+    try {
+      // 候选二：session 被拆掉后 `keyOf` 退化到的键。
+      const agentId = agent?.id
+      if (typeof agentId === 'string' && agentId !== '') {
+        statusKeys.add(agentId)
+        // 按 id 记账的原键也要删；记账本身随后清掉，避免无界增长。
+        for (const remembered of statusKeysOfAgentId.get(agentId) ?? []) statusKeys.add(remembered)
+        statusKeysOfAgentId.delete(agentId)
+      }
+    } catch {
+      // 两个候选都取不到只意味着没有状态条目可删。
+    }
+    return statusKeys
   }
 
   /**
@@ -1403,6 +1953,11 @@ export function apply(ctx, config) {
   /** 重算并装上限制（顺序「读 → 卸 → 装」，理由见下方注释）。 */
   const sync = (agent) => {
     if (agent === undefined || agent === null) return
+    // ⚠️⚠️ 2026-11-06（P0-1）：session key 必须在这里就取好。
+    // 下面有两处「守卫没装上」的早退点（读不到工具面 / restrict 与 guard 双双失败），
+    // 它们都要往 GUARD_INSTALL_STATUS 写状态、打一条带 agent id 的 error 日志。原来 key
+    // 只在成功路径末尾（旧 :2187）才计算，早退点根本拿不到它 —— 于是最该报警的那次反而静默。
+    const key = keyOf(agent)
 
     // 队友 / 代理走原路：他们必须有完整工具集来干活。
     if (isDelegatedChild(agent)) {
@@ -1420,18 +1975,29 @@ export function apply(ctx, config) {
     if (owner !== undefined && owner !== presetId) {
       const lifted = release(agent)
       if (lifted) {
-        ctx.logger?.info?.(
+        logInfo(
           `blackpig-guard: released the restriction for a session of another mode (${owner}); its tool roster is left untouched`,
         )
       }
+      // ⚠️⚠️ 2026-11-07 修（R8，B1）：切走 preset 时也要删掉状态表里本 agent 的条目。
+      // 原来 `release(agent)` 之后直接 return，已写入的 degraded / unprotected 记录会一直留着：
+      // system-prompt 注入那段只读表、不校验 owner，已切回其它 preset 的会话仍会收到一次
+      // 「Black Pig guard is NOT fully engaged」，guardInstallStatus() 也仍返回旧记录。
+      // 删除逻辑与 agent/disposed 同源：建状态时实际用的 key（记账）+ keyOf + session.id +
+      // agent.id 多候选，各自有值就都删；只删本 agent 的键，别的会话不动。
+      // ⚠️ 2026-11-07（R9，优化 6）：候选键的收集抽成 `statusKeysFor(agent)`，与
+      // `agent/disposed` 那段同源（原先两处逐字重复）。删除动作仍在原来的位置。
+      const statusKeys = statusKeysFor(agent)
+      for (const statusKey of statusKeys) GUARD_INSTALL_STATUS.delete(statusKey)
       return
     }
     if (owner === undefined) {
       // 读不出归属，但这是大脑 scope（preset 行就装在这里）→ 保持收窄。
       warn(
-        'could not determine which preset this session belongs to (composedPreset unreadable and the session ' +
+        `could not determine which preset this session belongs to (scope=${agentScopeKeyOf(agent)}; composedPreset unreadable and the session ` +
           'header records no agentPreset); keeping the coordinator narrowing in place (fail-closed). ' +
           'If this session is actually another mode, its tools will be over-restricted until the preset is readable.',
+        agentScopeKeyOf(agent),
       )
     }
 
@@ -1459,8 +2025,36 @@ export function apply(ctx, config) {
     if (state0 !== undefined && state0.healthy === true) {
       const nowVisible = visibleToolNames(ctx, agent)
       if (nowVisible.length > 0) {
-        const leaked = nowVisible.filter((name) => !keep.has(name) && !extraDeny.has(name))
-        if (leaked.length === 0) {
+        // ⚠️⚠️ 2026-11-07 修（R10，#2）：泄漏判据必须排除「本层注册、restrict 摘不掉」的工具。
+        //
+        // restrictableNames 的定义是「全局层 + 祖先层，不含本层」，而 visible 是包含本层的
+        // （own.tools 无条件可见）。原来直接用 !keep.has(name) 判泄漏，于是一个注册在本层、
+        // 又不在 keep 里的工具永远被判成泄漏 → leaked 恒非零 → 幂等永不成立 → 每次工具调用
+        // 全量重算 + 每次 info 日志，healthy 永远用不上。
+        //
+        // 现在只有出现在 restrictableNames（继承层）里的名字才可能是泄漏：本层工具既进不了
+        // deny，也不是 restrict 失效的证据。继承层里冒出来的名字仍必须过 isCoordinatorTool
+        // （keep 且非 extraDeny），不通过就是真泄漏、照旧重算 —— 幂等没有因此变弱。
+        // 读不到 restrictableNames 时不做任何跳过，落到下面重算（无法证明仍然正确）。
+        let restrictableNow
+        try {
+          restrictableNow = restrictableNamesOf(agent?.ctx?.tools, agent)
+          if (restrictableNow === undefined) {
+            let registry
+            try {
+              registry = ctx.get('tools')
+            } catch {
+              registry = undefined
+            }
+            if (registry !== undefined && registry !== null) restrictableNow = restrictableNamesOf(registry, agent)
+          }
+        } catch {
+          restrictableNow = undefined
+        }
+        const leaked = restrictableNow === undefined
+          ? null
+          : nowVisible.filter((name) => restrictableNow.has(name) && !isCoordinatorTool(name))
+        if (leaked !== null && leaked.length === 0) {
           // ⚠️ 2026-11-01：提前返回前必须刷新 teamOn。团队 6 个都在 keep 里，
           // 晚注册时 leaked 仍为 0 → 若在这里 return，teamOn 会冻结成 solo，
           // 文案说「没有队友」而工具其实都在（逆向误导，无任何报错）。
@@ -1468,9 +2062,17 @@ export function apply(ctx, config) {
           // 可见面恰好等于保留集 → 限制仍然正确，无需重装（避免装/卸振荡）。
           return
         }
-        ctx.logger?.info?.(
-          `blackpig-guard: the visible surface changed since the last restriction (${leaked.length} unexpected tool(s): ${leaked.slice(0, 8).join(', ')}); recomputing`,
-        )
+        if (leaked !== null) {
+          logInfo(
+            `blackpig-guard: the visible surface changed since the last restriction (${leaked.length} unexpected tool(s): ${leaked.slice(0, 8).join(', ')}); recomputing`,
+          )
+        } else {
+          // 读不到 restrictableNames = 无法证明可见面仍然正确 → 落到下面重算（安全方向），
+          // 且保留一条诊断，避免「每次都重算」看起来像无原因的空转。
+          logInfo(
+            'blackpig-guard: could not read restrictableNames to verify the visible surface; recomputing (fail-safe)',
+          )
+        }
       }
       // 读不到可见面时不能证明「仍然正确」，落到下面重算（安全方向）。
     }
@@ -1479,13 +2081,6 @@ export function apply(ctx, config) {
     // 可见集（已被过滤），也不能用全局层 schemas()（会漏掉 preset 祖先层的 pwsh/write/edit）。
     const visible = fullToolNames(ctx, agent)
 
-    // ── 团队工具的动态检测（方案 C，2026-10-31）──
-    //
-    // 目标：团队插件关掉时，`spawn_teammate` / `wait_agent` / `team_task_*` 这 6 个
-    // 名字就不存在了，而 `restrict({deny})` 会拿 `restrictableNames` 校验，
-    // 未知名字直接抛错 → 整条限制装不上（黑猪是 fail-closed，会失去保护）。
-    // 所以要把 keep 里「当前 roster 不存在」的团队工具剔掉。
-    //
     // ⚠️⚠️ 判据必须用 **agent 可见集**（`visibleToolNames`），**不能用**
     // `fullToolNames()` / `restrictableNames`。原因（2026-10-31 实测踩到）：
     //
@@ -1529,7 +2124,7 @@ export function apply(ctx, config) {
       teamOn.set(agent, teamAvailable(available))
       const dropped = pruneAbsentTeamTools(available)
       if (dropped.length > 0) {
-        ctx.logger?.info?.(
+        logInfo(
           `blackpig-guard: ${dropped.length} team-only tool(s) are not on the visible surface yet ` +
             `(${dropped.join(', ')}); they stay in the keep-list, so they become usable as soon as ` +
             'the Agent Teams plugin registers them (the coordinator always keeps send_message / ' +
@@ -1549,13 +2144,114 @@ export function apply(ctx, config) {
     // 用 `seen`（上面的数组）而不是 `available`（Set）：Set 会去重，长度可能与数组不等，
     // 而这里的判据要的是「可见面是否为空」，数组更忠实。
     const agentVisible = seenForFaultCheck ?? []
-    if (visible.length === 0 || agentVisible.length === 0) {
-      const alreadyLive = live.has(agent)
-      warn(
-        alreadyLive
-          ? 'no tool schemas were readable on a resync; the PREVIOUS restriction is kept in place (failing safe, not open)'
-          : 'no tool schemas were readable for a coordinator scope; the restriction is NOT engaged for this session yet (will retry on the next tool call)',
+    // ⚠️⚠️ 2026-11-07 修（R18a，BUG-2）：判据是「**能否读到完整工具面**」，不是「可见面是否为空」。
+    //
+    // 旧判据 `visible.length === 0 || agentVisible.length === 0` 把两件相反的事混成一件：
+    //   · 可见面被 restrict 彻底清空（`agentVisible` 为空）—— 保护**完美生效**的典型结果；
+    //   · 完整工具面也读不到（`visible` 也为空）—— 真正的故障。
+    // 纯 deny 面（如 ['pwsh','write','edit'] 全不在 keep）时 restrict 把可见面清得一个不剩，
+    // 于是每次 resync 都落进下面那条分支：追加一条 PROTECTION NOT ENGAGED error、
+    // 状态打成 degraded、healthy 恒 false —— 而限制实际一直在生效。
+    //
+    // 这正是本文件 R16 / BUG-1 那段 fail-closed 自检（`const fullSurface = fullToolNames(ctx, agent)`）用过的
+    // 同一条判据 —— 同一件事必须用同一个口径，这里把只修一半的那半补齐。
+    //
+    // 判据直接用 `visible`：它就是上面 `const visible = fullToolNames(ctx, agent)` 的结果（**未过滤**
+    // 的完整继承集 + 全局层），也正是上述自检里拿来当旁证的那个集合。所以：
+    //   · `visible` 非空 → 完整工具面读得到 ⇒ 空的 `agentVisible` 是限制清空的，保护生效，
+    //     不进故障分支（继续走下面的重算 / 安装路径）；
+    //   · `visible` 为空 → 完整工具面也读不到 → 才是真「读不到」，照旧报 PROTECTION NOT ENGAGED。
+    // 这里**不**重复调一次 `fullToolNames()`：与上方「简化审计发现 7」那段同一条理由 —— 两次读之间没有
+    // await、没有安装动作，纯读结果必然相同，再读一次只是好几十次 schema 深拷贝。
+    // 真正的保护丢失不会因此被放行：可见面非空但限制没装上时，下方的
+    // PROTECTION LOST / RE-INSTALL FAILED 判据照旧生效，且下方的 fail-closed 自检还会实测。
+    if (visible.length === 0) {
+      // ⚠️⚠️ 2026-11-07 修（R9，#4）：判据不能用 `live.has(agent)`。
+      // :2164 的 PROTECTION LOST 分支同样会 `live.set(agent, {…, healthy:false})` —— 那是
+      // 一条**占位**记录（disposer / liftGuard 显式写成 undefined），只是为了让下一次 sync
+      // 不走幂等跳过。`live.has` 只回答「表里有这条」，不回答「有没有真的装成过」；于是
+      // 「从未装成任何一层」的会话在又一次读不到工具面时会被记成 degraded，与事实不符。
+      //
+      // 现在按**真实安装记录**判（看 `live` 里那条记录的三条直接证据）：
+      //   · `disposer` / `liftGuard` **只**在某一层确实装上时才被写成函数（成功路径的
+      //     `live.set` 写的正是它们的返回值；占位记录里它们是显式 undefined）；
+      //   · `healthy === true` 只在两层都通过装完后的 fail-closed 自检时才为真。
+      // 三者全不成立 = 从未装成过任何一层 → UNPROTECTED；否则 → DEGRADED（旧保护仍在）。
+      const liveRecord = live.get(agent)
+      const alreadyLive =
+        liveRecord !== undefined &&
+        liveRecord !== null &&
+        (liveRecord.healthy === true ||
+          typeof liveRecord.disposer === 'function' ||
+          typeof liveRecord.liftGuard === 'function')
+      // ⚠️⚠️ 2026-11-07 修（R16，BUG-2）：读不到工具面时**绝不能**用空数组覆盖状态。
+      //
+      // 旧实现写 `deny: []` / `unknownNames: []`，而 detail 自己说「PREVIOUS restriction
+      // is kept in place」—— 两处互相矛盾。`live` 里那份旧限制确实还在生效
+      // （disposer / liftGuard 没被碰），但状态表被改成「什么都没隐藏」，于是 system-prompt
+      // 注入读到 `deny.length === 0` → 告诉模型「Hidden tools: (none submitted)」，
+      // 而 pwsh / write / edit 实际仍被隐藏。那是**假信息**，不是 fail-safe 文案。
+      //
+      // 现在：优先沿用**实际生效**的那一份 deny（旧状态记录，其次 live 里能读到的），
+      // 确实取不到时才退到空数组，并让 detail 如实说明「无法读取当前隐藏集合」。
+      // 同时把原来重复的 warn(detail) + logError(PROTECTION NOT ENGAGED ...) 合并成一条：
+      // 同一件事只报一次，且仍带 session id + agent id。
+      const liveSnapshot = live.get(agent)
+      const readPreviousList = (field) => {
+        const fromStatus = key === undefined ? undefined : GUARD_INSTALL_STATUS.get(key)
+        for (const candidate of [fromStatus, liveSnapshot]) {
+          if (candidate === undefined || candidate === null) continue
+          if (!Array.isArray(candidate[field])) continue
+          return candidate[field].filter((name) => typeof name === 'string' && name !== '')
+        }
+        return undefined
+      }
+      const previousDeny = readPreviousList('deny')
+      const previousUnknown = readPreviousList('unknownNames')
+      const keptDeny = previousDeny ?? []
+      const keptUnknown = previousUnknown ?? []
+      const denyUnreadable = previousDeny === undefined
+      const denyNote = previousDeny !== undefined
+        ? `the previous restriction is kept in place and still hides ${keptDeny.length} tool(s)`
+        : 'the current hidden set could NOT be read (no previous record), so do not assume nothing is hidden'
+      const detail = alreadyLive
+        ? `no tool schemas were readable on a resync; ${denyNote} (failing safe, not open)`
+        : 'no tool schemas were readable for a coordinator scope; the restriction is NOT engaged for this session yet (will retry on the next tool call)'
+      // ⚠️⚠️ 2026-11-06（P0-1）：这是「守卫没装上」的真实失败路径之一，必须落状态表 +
+      // 一条带 agent id 的 error 日志。日志通道不会被 runtime-context 抑制（见 P0-3）。
+      const state = alreadyLive ? GUARD_STATE_DEGRADED : GUARD_STATE_UNPROTECTED
+      const statusRecorded = recordStatus(agent, key, {
+        state,
+        healthy: false,
+        restrictApplied: false,
+        restrictVerified: false,
+        guardVerified: false,
+        deny: [...keptDeny],
+        unknownNames: [...keptUnknown],
+        // 为 true 时下游注入必须说「无法读取」，而不是假装「没有隐藏工具」。
+        denyUnreadable,
+        requestedScope: `agent:${key ?? '<no-id>'}`,
+        error: detail,
+        at: Date.now(),
+      })
+      // ⚠️ 2026-11-07 修（R17，BUG-2）：只有**真的写进状态表**才说 "Status recorded"。
+      // 取不到 session id 时状态表里没有这一条，日志必须如实说「未能记录」。
+      logError(
+        `blackpig-guard: PROTECTION NOT ENGAGED for session ${key ?? '<no-id>'} ` +
+          `(agent ${agent?.id ?? '<unknown id>'}) — ${detail}. ` +
+          (statusRecorded
+            ? `Status recorded as "${state}"; this session must be treated as unconstrained.`
+            : 'The install status could NOT be recorded (no session id was available), so guardInstallStatus() ' +
+              'has no entry for this session; this session must be treated as unconstrained.'),
       )
+      // ⚠️⚠️ 2026-11-07 修（R8，B2）：状态表与 live 必须同时翻成「不健康」。
+      // 原来只写状态表，live 里那条仍是 healthy=true → 下次 sync 若可见面恢复且 leaked===0，
+      // 会在幂等早退处直接 return（既不 recordStatus，也不重做 fail-closed 自检），
+      // 于是表停在 degraded、live 说 true，永久不一致。与 :2108 同形：
+      // 刻意**不**覆盖 live（保住 disposer / liftGuard 的引用），只把 healthy 打成 false，
+      // 让下一次 sync 继续重试。状态值的选择逻辑不变（仍由 alreadyLive 决定）。
+      const previousLive = live.get(agent)
+      if (typeof previousLive === 'object' && previousLive !== null) previousLive.healthy = false
       return
     }
 
@@ -1582,50 +2278,159 @@ export function apply(ctx, config) {
 
     const tools = agent?.ctx?.tools
     if (tools === undefined || typeof tools.restrict !== 'function') {
-      warn('the agent scope exposes no tools.restrict(); this session keeps the full roster')
+      warn(
+        `the agent scope exposes no tools.restrict() (scope=${agentScopeKeyOf(agent)}); this session keeps the full roster`,
+        agentScopeKeyOf(agent),
+      )
       // 注意：restrict 不可用时仍然继续往下装 guard —— 执行层的硬拦必须尽力而为。
       // 唯一的例外是 guard 也不可用（下面会再检查）。
     }
 
     /**
-     * `restrict()` 会拿 `restrictableNames`（全局层 + 祖先层，**不含本层**）校验每个
-     * 名字，未知即抛错。而 `schemas(agent)` 返回的可见面**包含本层注册的工具**
-     * （Agent Teams 的 9 个就在 agent 自己的层上）。所以补集里可能混进本层名字。
+     * 装上 restriction —— **任何情况下都不许抛**，也**不许假装成功**。
      *
-     * 这里不猜，而是照着错误信息点名剔除后重试一次：错误原文形如
-     * `names unknown global tool "a", "b"`。
+     * ── 改了什么（2026-11-06，通用化改造二）────────────────────────────────────
+     *
+     * 旧实现是「照着错误信息点名剔除后重试一次」：先让 restrict() 抛，
+     * 再用正则解析 `names unknown global tool "a", "b"` 把名字抠出来、重试。
+     * 这是**依赖宿主错误文案**的耦合 —— 宿主把这句话换一种说法（加个前缀、
+     * 改成列表、本地化），正则就匹配不上，整条限制直接装不上，而日志只有一条
+     * 泛泛的 warn。
+     *
+     * 新实现是「调用前先取交集」：
+     *   ① `tools.view(scope).restrictableNames` 存在 → 与 deny 求交，只提交**已知**名字；
+     *      被剔掉的未知名单独记一条 **error**（列出全部名字），因为那是真实异常：
+     *      我们算出的 deny 里出现了宿主说它不存在的工具。
+     *   ② `view()` 或 `restrictableNames` 不存在（旧宿主 / 未来版本改名）→ 走降级路径：
+     *      不提交（提交了必然抛），记 error 说明降级原因，仍返回结构化失败。
+     *   ③ 整个 restrict() 包 try/catch：catch 住**任何**异常，logger.error 带
+     *      scope / deny 列表 / 原始报错全部原文，然后返回结构化失败 ——
+     *      绝不让插件构造失败（历史上「改个 deny 列表插件就不启动」就是它）。
+     *
+     * 返回值语义：
+     *   · `{ dispose, applied }` —— 成功，applied 是**真正下发**的 deny 集。
+     *   · `{ applied: [], error, unknownNames, scope }` —— 失败或降级；
+     *     调用方据此把「守卫未安装」写进 GUARD_INSTALL_STATUS 并在上下文里提示。
+     *
+     * @param names - 期望下发的 deny 列表。
+     * @param requestedScope - 本次限制的 scope 标识（写进诊断/错误日志）。
+     * @returns {{dispose?: Function, applied: string[], error?: string, unknownNames?: string[], scope?: string}}
      */
-    const restrictWith = (names) => {
+    const restrictWith = (names, requestedScope) => {
+      const scopeLabel = String(requestedScope ?? '<unknown scope>')
+      const requested = Array.isArray(names) ? names.filter((n) => typeof n === 'string' && n !== '') : []
+
+      // ⚠️⚠️ 2026-11-07 修（R10，#8）：deny 本来就为空 ≠ restrict 失败。
+      //
+      // 极简「纯大脑」preset 下，继承面里每个工具都在 keep/extraDeny 里 → deny = []。
+      // 原来的 known.length === 0 分支把它当成「求交后没有可限制的名字」记 error + degraded
+      // + 注入 NOTICE，但事实是根本没有东西需要隐藏，guard 层也完全在拦。
+      // 这里先按「请求列表本身为空」识别这种正常态：不调用 restrict（空 deny 是 no-op），
+      // 用 `nothingToHide` 显式标记，让下游把它当作 restrict 层的成功（状态 engaged、
+      // healthy=true、不注入 NOTICE）。不用 no-op disposer 冒充已装：状态里的
+      // restrictApplied 仍如实写成 false（确实没有限制在生效，因为无需生效）。
+      // 只有 requested 非空、却与 restrictableNames 求交后为空时，才是真失败（见下方）。
+      if (requested.length === 0) {
+        logInfo(
+          `blackpig-guard: nothing to withhold for scope=${scopeLabel} — every visible tool is inside the ` +
+            'coordinator keep-set, so restrict() is not needed (the guard layer still applies).',
+        )
+        return { applied: [], unknownNames: [], scope: scopeLabel, nothingToHide: true }
+      }
+
+      // ── 降级路径：先看当前版本有没有 restrictableNames ──
+      let restrictable
+      try {
+        restrictable = restrictableNamesOf(tools, agent)
+      } catch (error) {
+        restrictable = undefined
+        logError(
+          `blackpig-guard: reading restrictableNames threw for scope=${scopeLabel} ` +
+            `(${error instanceof Error ? error.stack ?? error.message : String(error)}); falling back to the degraded ` +
+            'path — the restriction is NOT installed for this session and the coordinator keeps the full roster.',
+        )
+      }
+      if (restrictable === undefined) {
+        const message =
+          `tools.view(scope).restrictableNames is unavailable on this host, so the deny list cannot be ` +
+          `validated before submission; scope=${scopeLabel}, ${requested.length} name(s) withheld from restrict(): ` +
+          `${requested.slice(0, 40).join(', ') || '(none)'}`
+        logError(
+          `blackpig-guard: ${message}. DEGRADED PATH: the restriction was NOT submitted (submitting unvalidated ` +
+            'names would throw on hosts that validate them). The hard-deny guard is still installed as the last line.',
+        )
+        return { applied: [], error: message, unknownNames: [], scope: scopeLabel, degraded: true }
+      }
+
+      // ── 主路径：先求交，再提交 ──
+      const unknown = requested.filter((name) => !restrictable.has(name))
+      const known = requested.filter((name) => restrictable.has(name))
+      if (unknown.length > 0) {
+        // 这是**真实异常**：deny 是从「可见集 − 保留集」算出来的，宿主却说这些名字
+        // 不在可限制集合里。要么可见集读错了，要么宿主的集合语义变了 —— 两种都要查。
+        logError(
+          `blackpig-guard: ${unknown.length} name(s) in the computed deny list are NOT restrictable on this host ` +
+            `and were dropped BEFORE calling restrict() — scope=${scopeLabel}; unknown: [${unknown.sort().join(', ')}]; ` +
+            `${known.length} known name(s) still submitted. ` +
+            'This is not routine: deny is computed from the visible surface, so an unknown name means the visible ' +
+            'set and restrictableNames disagree (host API change, or a listener registered/removed tools mid-sync).',
+        )
+      }
+
+      // ⚠️ R10 #8：能走到这里说明 requested 非空 —— 求交后为空才是
+      // 「预期要隐藏但一个都藏不成」的真失败，照旧报 error / degraded。
+      if (known.length === 0) {
+        const message =
+          `no restrictable names left after intersecting with restrictableNames; scope=${scopeLabel}, ` +
+          `requested=${requested.length}, unknown=${unknown.length}`
+        logError(
+          `blackpig-guard: ${message} — restrict() was NOT called (an empty deny is a no-op and would hide the ` +
+            'failure). The hard-deny guard is still installed as the last line.',
+        )
+        return { applied: [], error: message, unknownNames: unknown, scope: scopeLabel }
+      }
+
       // restrict 与它的 disposer 都同步发 tools/change，必须吞回声。
       return quietly(() => {
         try {
-          return { dispose: tools.restrict({ deny: names }), applied: names }
+          const dispose = tools.restrict({ deny: known })
+          return { dispose, applied: known, unknownNames: unknown, scope: scopeLabel }
         } catch (error) {
+          // ⚠️ 这里**兜住一切**：插件构造绝不能因为宿主校验变严而失败。
+          // 但也绝不当成功 —— 返回 error，由调用方写进 GUARD_INSTALL_STATUS。
           const message = error instanceof Error ? error.message : String(error)
-          const match = /unknown global tool[s]? ((?:"[^"]+"(?:, )?)+)/.exec(message)
-          if (match === null) return { error: message }
-          const offenders = new Set([...match[1].matchAll(/"([^"]+)"/g)].map((m) => m[1]))
-          const narrowed = names.filter((name) => !offenders.has(name))
-          ctx.logger?.info?.(
-            `blackpig-guard: ${offenders.size} name(s) in the complement are registered in this agent's own layer and cannot be restricted (Agent Teams tools are the expected case); retrying without them: ${[...offenders].sort().join(', ')}`,
+          const stack = error instanceof Error ? (error.stack ?? '') : ''
+          logError(
+            `blackpig-guard: tools.restrict() threw even though every submitted name was present in ` +
+              `restrictableNames — scope=${scopeLabel}; deny=[${known.join(', ')}]; unknown=[${unknown.join(', ')}]; ` +
+              `raw error: ${message}` +
+              (stack !== '' ? `\n${stack}` : ''),
           )
-          if (narrowed.length === 0) return { applied: [] }
-          try {
-            return { dispose: tools.restrict({ deny: narrowed }), applied: narrowed }
-          } catch (second) {
-            return { error: second instanceof Error ? second.message : String(second) }
-          }
+          return { applied: [], error: message, unknownNames: unknown, scope: scopeLabel }
         }
       })
     }
 
     // `tools.restrict` 不可用时（旧宿主 / 该 scope 没暴露）跳过隐藏层，
     // 但**必须继续装 guard** —— 执行层硬拦是最后一道防线，不能因为隐藏层缺失就不装。
+    // ⚠️ R10 #8 的同类：`deny` 为空时「没有东西可隐藏」与「restrict API 不可用」是两件事。
+    // 前者即使宿主没暴露 restrict 也是正常态（空 deny 本来就不需要调用它），不能记失败。
+    const restrictScope = `agent:${keyOf(agent) ?? '<no-id>'}`
     const attempt = typeof tools?.restrict === 'function'
-      ? restrictWith(deny)
-      : { applied: [], error: 'tools.restrict() is not available on this agent scope' }
+      ? restrictWith(deny, restrictScope)
+      : deny.length === 0
+        ? { applied: [], unknownNames: [], scope: restrictScope, nothingToHide: true }
+        : {
+            applied: [],
+            error: 'tools.restrict() is not available on this agent scope',
+            unknownNames: [],
+            scope: restrictScope,
+          }
     if (attempt.error !== undefined) {
-      warn(`engaging the restriction failed: ${attempt.error} — falling back to the hard-deny guard only`)
+      warn(
+        `engaging the restriction failed (scope=${agentScopeKeyOf(agent)}): ${attempt.error} — falling back to the hard-deny guard only`,
+        agentScopeKeyOf(agent),
+      )
     }
 
     const withheld = new Set(attempt.applied ?? [])
@@ -1786,11 +2591,45 @@ export function apply(ctx, config) {
           return undefined
         })
       } catch (error) {
-        warn(`installing the hard-deny guard failed: ${error instanceof Error ? error.message : String(error)}`)
+        warn(
+          `installing the hard-deny guard failed (scope=${agentScopeKeyOf(agent)}): ${error instanceof Error ? error.message : String(error)}`,
+          agentScopeKeyOf(agent),
+        )
       }
     }
 
-    if (attempt.dispose === undefined && liftGuard === undefined && withheld.size === 0) {
+    // ⚠️⚠️ 2026-11-07 修（R14，BUG-2）：判「保护是否真的丢失」必须考虑**配置意图**。
+    //
+    // 旧判据是「restrict 没 disposer + guard 没装上 + withheld 为空」三者同时成立。
+    // `hardDeny:false` + 可视面全在 keep 内（deny 为空、nothingToHide）时三者天然全空 ——
+    // 但那是**正常态**：没有东西可隐藏，restrict 本就不该调用；执行层又是配置显式关掉的。
+    // 旧判据于是把它误判成 PROTECTION LOST、写 unprotected、healthy 恒 false，
+    // 每次 post-execute 都全量重装并重复报 error（与 :2638 起「hardDeny:false 时
+    // restrict 层通过即健康」的契约直接矛盾）。
+    //
+    // 新判据按「本应装而没装上」判丢失：
+    //   · restrict 层只为「有东西要隐藏」（deny 非空）而装；deny 为空 → 不要求它；
+    //   · guard 层只为 `hardDeny:true` 而装；`hardDeny:false` → 不要求它；
+    //   · 两层都不在位、且至少有一层本应装 → 才是真的没有任何保护的 PROTECTION LOST。
+    // 反面情形仍会告警：`hardDeny:true` 且 guard 没装上、同时 restrict 也没装（或无可隐藏）
+    // 时走本分支；只有其中一层真正装上时，走下面 :2520 起的 fail-closed 分档报错。
+    const restrictProtectionEngaged = attempt.dispose !== undefined
+    const guardProtectionEngaged = liftGuard !== undefined
+    // ⚠️⚠️ 2026-11-07 修（R17，BUG-3）：`deny` 为空是「本来就没东西要隐藏」的正常态，
+    // 不能因为它没有 disposer 就当成保护丢失。R14 只修了 `hardDeny:false` 那一半；
+    // `hardDeny:true` + roster 全在 keep 内 + `guard()` 缺失/抛错时，旧判据仍会喊
+    // "see and execute every tool" —— 那是**假失败**。现在把「有没有可隐藏的东西」
+    // 与「执行层本应装却没装」分开判：
+    //   · 有东西要隐藏、两层都没装上 → 仍是真正的 PROTECTION LOST（下方原分支，不放行）；
+    //   · 没东西要隐藏、只是 guard 层没装上 → 走专用分支，如实说「执行层未装配」，
+    //     绝不宣称「能看到并执行全部工具」，也不写 unprotected。
+    // 「没东西要隐藏」不能只看 deny 为空：本层注册的工具不在 restrictableNames 里、
+    // 因而进不了 deny。所以再用**实测可见面**复核一次 —— 只要可见面上真有 keep 外的
+    // 工具，就仍然按真保护丢失处理，绝不放行。
+    const visibleOutsiders = agentVisible.filter((name) => !isCoordinatorTool(name))
+    const nothingToHide = attempt.nothingToHide === true && deny.length === 0 && visibleOutsiders.length === 0
+    const protectionExpected = deny.length > 0 || hardDeny
+    if (!restrictProtectionEngaged && !guardProtectionEngaged && protectionExpected && !nothingToHide) {
       // ⚠️⚠️ 安装失败路径 —— BUG-6 修完之后，这里**不再丢保护**。
       //
       // 旧实现：`sync()` 先 `release(agent)` 再重装，两层同时失败时旧保护已被卸掉，
@@ -1803,9 +2642,25 @@ export function apply(ctx, config) {
       //   · 有旧状态 → 什么都不做，只记一条 error 说明"保留旧保护"，绝不覆盖 live；
       //   · 没有旧状态（首次安装就失败）→ 才是真的没有保护，喊 PROTECTION LOST。
       const hadPrevious = previousState !== undefined
+      // ⚠️⚠️ 2026-11-06（P0-1）：这是最严重的一条「守卫没装上」路径。两个 return
+      // （有旧状态 / 首次安装就失败）都必须先写状态表，再打一条带 agent id 的 error。
+      const failState = hadPrevious ? GUARD_STATE_DEGRADED : GUARD_STATE_UNPROTECTED
+      recordStatus(agent, key, {
+        state: failState,
+        healthy: false,
+        restrictApplied: false,
+        restrictVerified: false,
+        guardVerified: false,
+        deny: [...withheld],
+        unknownNames: Array.isArray(attempt?.unknownNames) ? [...attempt.unknownNames] : [],
+        requestedScope: `agent:${key ?? '<no-id>'}`,
+        error: attempt?.error ?? 'PROTECTION LOST: no restriction and no guard installed',
+        at: Date.now(),
+      })
       if (hadPrevious) {
-        ctx.logger?.error?.(
-          'blackpig-guard: RE-INSTALL FAILED — the new restriction and the new hard-deny guard both failed to install. ' +
+        logError(
+          `blackpig-guard: RE-INSTALL FAILED for session ${key ?? '<no-id>'} ` +
+            `(agent ${agent?.id ?? '<unknown id>'}) — the new restriction and the new hard-deny guard both failed to install. ` +
             'The PREVIOUS protection is still in force (it was never released, because release now runs only after a ' +
             'successful install). The tool surface may be stale until the next successful sync.',
         )
@@ -1815,8 +2670,9 @@ export function apply(ctx, config) {
         if (typeof previousState === 'object' && previousState !== null) previousState.healthy = false
         return
       }
-      ctx.logger?.error?.(
-        'blackpig-guard: PROTECTION LOST — this session never had a working restriction and installing one failed ' +
+      logError(
+        `blackpig-guard: PROTECTION LOST for session ${key ?? '<no-id>'} (agent ${agent?.id ?? '<unknown id>'}) — ` +
+          'this session never had a working restriction and installing one failed ' +
           '(no restriction, no guard). The coordinator can currently see and execute every tool. ' +
           'This happens when the host tool API changes; the guard will keep retrying on each tool call.',
       )
@@ -1825,6 +2681,55 @@ export function apply(ctx, config) {
         liftGuard: undefined,
         healthy: false, // ← 关键：让下一次 sync 不走幂等跳过，立刻重试
       })
+      return
+    }
+
+    // ⚠️⚠️ 2026-11-07 修（R17，BUG-3）：`deny` 为空（可隐藏集合是空集，上面已用实测
+    // 可见面复核过「确实没有 keep 外的工具」）+ `hardDeny:true`，但执行层没装上
+    // （`tools.guard()` 缺失，或调用时抛错）。这是**执行层缺失**，不是「全量暴露」：
+    //   · 仍然如实告警（error 级，带 session / agent 标识）—— 执行层拦截确实不可用；
+    //   · 状态写 degraded 而不是 unprotected —— restrict 层的命题（「withheld 的名字
+    //     不可见」）在空集下为真，与 R10 #8 / R14 BUG-2 同一口径；
+    //   · healthy=false，下一次 sync 继续重试安装 guard；
+    //   · 文案只说「执行层未装配」，不说「能看到并执行全部工具」。
+    if (nothingToHide && hardDeny && !guardProtectionEngaged) {
+      const detail =
+        'the execution layer (tools.guard()) is NOT installed even though hardDeny is on; deny is empty because ' +
+        'every tool on this scope is inside the coordinator keep-set (the visible surface was re-checked: no tool ' +
+        'outside the keep-set is present), so this is a missing enforcement layer rather than a full-roster ' +
+        'exposure — but do not assume a call outside the keep-set would be denied'
+      const hadPrevious = previousState !== undefined
+      recordStatus(agent, key, {
+        state: GUARD_STATE_DEGRADED,
+        healthy: false,
+        restrictApplied: false,
+        // 空集下「withheld 的名字不可见」命题为真（同 R10 #8 的口径）。
+        restrictVerified: true,
+        guardVerified: false,
+        deny: [...withheld],
+        unknownNames: Array.isArray(attempt?.unknownNames) ? [...attempt.unknownNames] : [],
+        requestedScope: `agent:${key ?? '<no-id>'}`,
+        error: detail,
+        at: Date.now(),
+      })
+      logError(
+        `blackpig-guard: EXECUTION LAYER NOT ENGAGED for session ${key ?? '<no-id>'} ` +
+          `(agent ${agent?.id ?? '<unknown id>'}) — ${detail}. ` +
+          (hadPrevious
+            ? 'The PREVIOUS protection is still in force (it was never released); the guard will retry on the next tool call.'
+            : 'The guard will retry on the next tool call.'),
+      )
+      if (hadPrevious) {
+        // 与下方 RE-INSTALL FAILED 同取向：保住旧 disposer / liftGuard 的引用，
+        // 只把 healthy 打成 false，让下一次 sync 继续重试。
+        if (typeof previousState === 'object' && previousState !== null) previousState.healthy = false
+      } else {
+        live.set(agent, {
+          disposer: undefined,
+          liftGuard: undefined,
+          healthy: false, // ← 关键：让下一次 sync 不走幂等跳过，立刻重试
+        })
+      }
       return
     }
 
@@ -1837,21 +2742,52 @@ export function apply(ctx, config) {
     //
     // 这里做**装完之后的实测自检**，而不是相信「装的时候没报错」：
     //   ① 重读可见工具面，确认 denied 的名字真的不见了（restrict 生效的证据）
-    //   ② 直接调 guardReason 打一个必拒的工具，确认 guard 真的会拒（guard 生效的证据）
+    //   ② 直接调 checkGuards 打一个必拒的工具，确认 guard 真的会拒（guard 生效的证据）
     // 两层都失效 → 这是**没有任何保护**的状态，用 error 级别喊出来，并记进保护状态。
     const protectedLayers = []
-    if (attempt.dispose !== undefined) protectedLayers.push('restrict')
+    if (attempt.dispose !== undefined || attempt.nothingToHide === true) protectedLayers.push('restrict')
     if (liftGuard !== undefined) protectedLayers.push('guard')
 
     let restrictVerified = false
-    if (attempt.dispose !== undefined) {
+    if (attempt.nothingToHide === true) {
+      // R10 #8：本来就没有要隐藏的名字。restrict 层的目标是「withheld 里的名字不可见」，
+      // 空集下该命题为真 —— 记为成功，而不是「restrict 失败」。真失败（requested 非空、
+      // 求交为空）走不到这里，它在 restrictWith 里返回 error、不会带 nothingToHide。
+      restrictVerified = true
+    } else if (attempt.dispose !== undefined) {
+      // ⚠️⚠️ 2026-11-07 修（R16，BUG-1）：判据是「**能否读到工具面**」，不是「读到的数量 > 0」。
+      //
+      // 旧判据 `after.length > 0 && leaked.length === 0` 把 restrict **生效**的典型结果
+      // （可见面被清空、一个工具都不剩）误判成读失败 → restrictVerified=false →
+      // healthy 恒 false → 每轮重装 + 打假 error（"...0 withheld tool(s) are STILL visible ()"）。
+      // 保护越彻底越报错，而且与上面 `attempt.nothingToHide === true` 那档的语义
+      // （**空集 = 命题为真**）正好相反 —— 同一件事必须用同一个口径。
+      //
+      // 现在分三种情况，都不放行真失败：
+      //   · leaked 非空 → 真泄漏（restrict 返回了 disposer，但 withheld 仍可见）→ 失败；
+      //   · after 非空 → 读到了可见面且 withheld 一个都不在 → 直接证据，成功；
+      //   · after 为空 → 两种可能：「限制把可见面清空」（成功）或「工具面读不到」（失败）。
+      //     用 `fullToolNames()`（未过滤的完整继承集）作旁证：它读得到 → 可见面确实被
+      //     清空 = 成功；它也读不到 → 无法证明 = 失败。
+      // 注意：restrict 抛错 / 没有 disposer 根本进不到本分支，仍走上面的失败档。
       const after = visibleToolNames(ctx, agent)
       const leaked = after.filter((name) => withheld.has(name))
-      restrictVerified = after.length > 0 && leaked.length === 0
-      if (!restrictVerified) {
-        ctx.logger?.error?.(
+      if (leaked.length > 0) {
+        restrictVerified = false
+        logError(
           `blackpig-guard: FAIL-CLOSED CHECK FAILED — restrict() returned a disposer but ${leaked.length} withheld tool(s) are STILL visible (${leaked.slice(0, 8).join(', ')}). The schema layer is not enforcing.`,
         )
+      } else if (after.length > 0) {
+        restrictVerified = true
+      } else {
+        const fullSurface = fullToolNames(ctx, agent)
+        restrictVerified = fullSurface.length > 0
+        if (!restrictVerified) {
+          logError(
+            'blackpig-guard: FAIL-CLOSED CHECK FAILED — restrict() returned a disposer but the tool surface is unreadable ' +
+              '(both the visible set and the full inherited set came back empty). Cannot prove the restriction is hiding anything.',
+          )
+        }
       }
     }
 
@@ -1875,17 +2811,17 @@ export function apply(ctx, config) {
           [...withheld][0] ??
           deny.find((name) => typeof name === 'string' && name !== '') ??
           'pwsh'
-        const reason = tools.guardReason({ agent, callId: 'blackpig-guard-selfcheck', name: probeName, arguments: {} })
+        const reason = tools.checkGuards({ agent, callId: 'blackpig-guard-selfcheck', name: probeName, arguments: {} })
         guardVerified = typeof reason === 'string' && reason !== ''
         if (!guardVerified) {
-          ctx.logger?.error?.(
+          logError(
             `blackpig-guard: FAIL-CLOSED CHECK FAILED — the hard-deny guard is installed but did NOT deny the probe "${probeName}". Execution layer is not enforcing.`,
           )
         }
       } catch (error) {
         guardVerified = false
-        ctx.logger?.error?.(
-          `blackpig-guard: FAIL-CLOSED CHECK FAILED — tools.guardReason() threw while probing: ${error instanceof Error ? error.message : String(error)}`,
+        logError(
+          `blackpig-guard: FAIL-CLOSED CHECK FAILED — tools.checkGuards() threw while probing: ${error instanceof Error ? error.message : String(error)}`,
         )
       }
     }
@@ -1913,39 +2849,43 @@ export function apply(ctx, config) {
     //     （error 但明确说还有一层在拦，可执行工具仍被拒）；
     //   · 只有隐藏层（restrict）在拦 → "guard layer failed, restrict layer still hiding"
     //     （error，说明 schema 层还在挡，但执行层不设防）。
-    const restrictLayerOk = attempt.dispose !== undefined && restrictVerified
+    const restrictLayerOk =
+      attempt.nothingToHide === true || (attempt.dispose !== undefined && restrictVerified)
     // guard 层是否真的在拦：`guardVerified === true` 是**直接证据**。
     // （`guardVerified === null` 那一档已不可达，见上方 `probeName` 三级兜底的注释。）
     const guardLayerOk = guardVerified === true
     const nothingEnforcing = protectedLayers.length === 0 || (!restrictLayerOk && !guardOk && !guardLayerOk)
     if (nothingEnforcing) {
-      ctx.logger?.error?.(
+      logError(
         'blackpig-guard: ⚠️ THIS COORDINATOR SESSION IS RUNNING WITHOUT ANY ENFORCED TOOL RESTRICTION. ' +
           `Expected to withhold ${withheld.size} tool(s); layers installed: [${protectedLayers.join(', ') || 'none'}]. ` +
           'The model can reach the full roster. Treat every report from this session as unconstrained.',
       )
     } else if (!restrictLayerOk && guardLayerOk) {
       // N4 的正例：restrict 抛错但 guard 实测仍拒 pwsh → 不许喊 UNPROTECTED。
-      ctx.logger?.error?.(
+      logError(
         'blackpig-guard: restrict layer failed, guard layer still enforcing — ' +
           `the schema layer is NOT hiding anything (${attempt.error ?? 'restrict() returned no disposer'}), ` +
           `but the execution layer still denies every tool outside the keep-set (probe verified on "${probeName}"). ` +
           'The coordinator can see the full roster, but cannot execute it.',
       )
     } else if (restrictLayerOk && !guardLayerOk) {
-      ctx.logger?.error?.(
+      logError(
         'blackpig-guard: guard layer failed, restrict layer still hiding — ' +
           `the schema layer still withholds ${withheld.size} tool(s), but the execution layer could not be verified. ` +
           'A tool call that bypasses the schema list would not be denied.',
       )
     }
 
-    // `healthy` = 两层都真的在拦，且没有 unprotected 标记。
-    // 只有 healthy 的会话才会在后续 sync 里被跳过（避免装/卸振荡）。
-    // 任何一层失败 → healthy=false → 下次 sync 会重新尝试。
-    // healthy = 两层都确认在拦，且没落到"什么都没装上"。
-    // （原来的 `|| guardVerified === null` 一档已不可达，见上方 probeName 注释。）
-    const healthy = !nothingEnforcing && restrictVerified && guardVerified === true
+    // ⚠️⚠️ 2026-11-07 修（R13，BUG-2）：healthy 的判据必须与状态/日志**同源**。
+    // `hardDeny:false` 时 `guard()` 根本不会安装（`:2201 if (hardDeny)` 是唯一安装点），
+    // `guardVerified` 恒为 false。原来的 `&& guardVerified === true` 于是让 healthy
+    // **恒假** → 幂等判据永不成立 → 每次 post-execute 都全量 release+restrict
+    // （实测 restrict 调用 1→2→3→4、disposer 0→1→2→3），并每轮打一条
+    // "guard layer failed, restrict layer still hiding" 的假 error。
+    // 配置显式关掉执行层时，restrict 层通过自检就是健康；`hardDeny:true` 时本判据与
+    // 原来**逐字等价**（`!hardDeny || guardVerified === true` 退化为 `guardVerified === true`）。
+    const healthy = !nothingEnforcing && restrictVerified && (!hardDeny || guardVerified === true)
 
     // ⚠️ BUG-6 的最后一步：新状态**已经装好**（走到这里说明 restrict 或 guard 至少一层
     // 拿到了 disposer），现在才卸旧的那一份。这样一来：
@@ -1958,13 +2898,59 @@ export function apply(ctx, config) {
       liftGuard,
       healthy,
     })
-    const key = keyOf(agent)
     if (key !== undefined) tracked.set(key, agent)
+
+    // ── 把结局写进**可观测状态**（改造二第 2、3 条）──────────────────────────
+    //
+    // 为什么必须写：restrict() 的失败已经被 catch 住了，插件不会构造失败 ——
+    // 但「没有构造失败」不等于「守卫生效」。如果只打日志，那么：
+    //   · 启动自检读不到这份事实；
+    //   · Lead 的首条上下文不会提醒模型「你现在能看到全套工具」；
+    //   · 下一个读代码的人只会看到「插件起来了」，从而以为一切正常。
+    // 所以这里把结局分类成三档写进模块级表，键是 sessionId（resync 只带 id）。
+    //
+    // 分类与日志里的判据严格同源（都用 restrictLayerOk / guardLayerOk）：
+    //   · engaged    —— 隐藏层确认在挡（restrictVerified），且没有落进 UNPROTECTED；
+    //   · degraded   —— 隐藏层没确认，但执行层确认在挡；
+    //   · unprotected—— 一层都没确认在挡。
+    // 刻意不把 degraded 写成 engaged：可以执行被拒、但模型仍能看见全套 schema，
+    // 那是**能力泄漏**，必须让模型自己知道。
+    const guardState = nothingEnforcing
+      ? GUARD_STATE_UNPROTECTED
+      : restrictLayerOk
+        ? GUARD_STATE_ENGAGED
+        : GUARD_STATE_DEGRADED
+    if (key !== undefined) {
+      recordStatus(agent, key, {
+        state: guardState,
+        healthy,
+        restrictApplied: attempt.dispose !== undefined,
+        restrictVerified,
+        guardVerified: guardVerified === true,
+        // 这份 deny 是**实际下发**的集合；restrict 失败时它可能是空的。
+        deny: [...withheld],
+        // 求交时被剔掉的未知名（正常应为空）。
+        unknownNames: Array.isArray(attempt.unknownNames) ? [...attempt.unknownNames] : [],
+        requestedScope: typeof attempt.scope === 'string' ? attempt.scope : `agent:${key}`,
+        // 失败原因原文（成功时为 undefined）。
+        error: attempt.error,
+        at: Date.now(),
+      })
+    }
+    // 无论有没有 sessionId，fail-open 的那一档都必须有一条 error 兜底 ——
+    // 上面 nothingEnforcing 分支虽然已经喊过，但那条日志里没有 unknownNames 信息。
+    if (guardState !== GUARD_STATE_ENGAGED && Array.isArray(attempt.unknownNames) && attempt.unknownNames.length > 0) {
+      logError(
+        `blackpig-guard: session ${key ?? '<no-id>'} is running at guard state "${guardState}" and ` +
+          `${attempt.unknownNames.length} computed deny name(s) were rejected by the host before submission: ` +
+          `[${attempt.unknownNames.join(', ')}]. They are NOT hidden from the coordinator.`,
+      )
+    }
     // `guardVerified` 只有 true/false（probeName 三级兜底保证永远探得到），故无 'n/a' 档。
     const guardLabel = guardVerified ? 'ok' : 'FAIL'
-    ctx.logger?.info?.(
+    logInfo(
       `blackpig-guard: coordinator scope engaged — total ${visible.length}, withheld ${withheld.size}` +
-        `${attempt.dispose === undefined ? ' (restrict FAILED, hard-deny only)' : ''}` +
+        `${attempt.dispose === undefined && attempt.nothingToHide !== true ? ' (restrict FAILED, hard-deny only)' : ''}` +
         `, self-check: restrict=${restrictVerified ? 'ok' : 'FAIL'} guard=${guardLabel}` +
         `, healthy=${healthy}` +
         `${nothingEnforcing ? ' ⚠️ UNPROTECTED' : restrictLayerOk ? '' : ' (restrict layer down, guard layer live)'}: ${[...withheld].sort().join(', ')}`,
@@ -1982,13 +2968,86 @@ export function apply(ctx, config) {
       if (agent !== undefined) sync(agent)
       return
     }
-    for (const agent of [...tracked.values()]) sync(agent)
+    for (const agent of [...tracked.values()]) {
+      try {
+        sync(agent)
+      } catch (error) {
+        // ⚠️ 2026-11-07 修（R10，#1）：批量重算必须逐项吞错。
+        // tracked 里可能有多个大脑；一个 agent 的 sync 抛错（宿主 API 变化、
+        // agent 已被半拆、属性 getter 抛错）不能让排在它后面的 agent 本轮全部跳过。
+        // 取向与 subtalk 的单任务循环一致：吞在本项、带 agent 标识记一条 error、继续下一项。
+        // 正常路径（sync 不抛）行为与此前完全一致。
+        let agentId = '<unknown id>'
+        try {
+          const sessionId = agent?.session?.id
+          if (typeof sessionId === 'string' && sessionId !== '') agentId = sessionId
+        } catch {
+          // session getter 本身可能就是抛错来源，退到 agent.id。
+        }
+        if (agentId === '<unknown id>') {
+          try {
+            const id = agent?.id
+            if (typeof id === 'string' && id !== '') agentId = id
+          } catch {
+            // 两个标识都读不到：保留占位符，日志仍能说明是哪一个 tracked 项失败。
+          }
+        }
+        logError(
+          'blackpig-guard: resync of a tracked agent threw — this agent tool surface may stay stale until the next sync; ' +
+            'the remaining tracked agents are still resynced. agent=' + agentId + '; underlying error: ' +
+            (error instanceof Error ? (error.stack ?? error.message) : String(error)),
+        )
+      }
+    }
   }
 
   // ── 主路径：agent 一出现就装，赶在首次 prompt 组装之前 ──
-  // payload 是对象，必须解构（把第一个参数当 agent 读会静默跳过）。
-  ctx.on('agent/created', ({ agent }) => {
-    sync(agent)
+  // payload 是对象，必须从 payload 里取 agent（把第一个参数当 agent 读会静默跳过）。
+  //
+  // ⚠️⚠️ 2026-11-06：这里**必须**整体 try/catch，理由是本条事件的分发方式：
+  //
+  //   dsh-agent/lib/index.js:703-719 的 announce() 调的是
+  //   await this.ctx.serial(entry.carrier, "agent/created", {...})，而
+  //   cordis/lib/index.js:873-879 的 serial 是**顺序 await 每个 listener、
+  //   没有 per-listener try/catch**。所以本回调抛出的任何异常都会：
+  //     · 终止整条 serial 链 → 排在后面的 listener 一个都不执行；
+  //     · 冒到 announce → agents.register() 的 effect 里 → agent 注册失败。
+  //
+  // 本文件在 cordis.patch.yml 里**排在 member-persona 之前**（:295 vs :350 附近），
+  // 所以一次未捕获异常 = **member-persona 的人格静默不注入**，连一条 warn 都没有。
+  // 这是一个已经真实发生过的故障形态（有 Lead 会话人格回落成宿主默认），
+  // 绝不能让本守卫成为它的放大器。
+  //
+  // 正确取向：**吞在这一层，但绝不静默** —— 记 error，写清「该 agent 的工具面
+  // 未收窄」，带 agent id 与错误原文，让下次排查能直接定位。
+  ctx.on('agent/created', (payload) => {
+    // ⚠️ 2026-11-07 修（R14，BUG-1）：参数**不解构** —— 解构发生在 try 之外，
+    // handler(undefined) 会抛 "Cannot destructure property 'agent' of 'undefined'"，
+    // 这段保护根本兜不住，而且异常会截断整条 ctx.serial 链（含 member-persona 注入）。
+    // 与 member-persona.mjs:352 的 R8#8 同源：先取 payload.agent、判空、再装。
+    try {
+      const agent = payload?.agent
+      if (agent === undefined || agent === null) return
+      sync(agent)
+    } catch (error) {
+      // ⚠️ payload / agent 的 getter 本身也可能是抛错来源 —— 取 id 必须再兜一层，
+      // 否则 catch 里重新读 `payload.agent` 会把异常原样抛回 serial 链，等于没修。
+      let agentId = '<unknown id>'
+      try {
+        const id = payload?.agent?.id
+        if (typeof id === 'string' && id !== '') agentId = id
+      } catch {
+        // 读不到标识：保留占位符，日志仍能说明是哪条事件失败。
+      }
+      const detail = error instanceof Error ? (error.stack ?? error.message) : String(error)
+      logError(
+        'blackpig-guard: syncing agent "' + agentId + '" threw — ' +
+          'this agent tool surface was NOT narrowed. ' +
+          'Contained here on purpose: agent/created is dispatched with ctx.serial(), which has no per-listener ' +
+          'try/catch, so letting this escape would also skip every later listener (including member-persona). ' +
+          'Underlying error: ' + detail,
+      )
+    }
   })
 
   // ── 自愈：每次工具调用结束后重算 ──
@@ -2005,94 +3064,118 @@ export function apply(ctx, config) {
     'tools/post-execute',
     async (exec, result, next) => {
       const agent = exec?.agent
-      sync(agent)
+      // 自愈重算。sync 失败绝不能打断这条 waterfall（下游还挂着宿主的 spill-policy、
+      // repeat-tool-reminder、tool-fs-search 后处理）；吞在本层但记 error，不静默。
+      try {
+        sync(agent)
+      } catch (error) {
+        logError(
+          'blackpig-guard: resync during tools/post-execute threw — this agent tool surface may stay stale until the next sync. ' +
+            'Underlying error: ' + (error instanceof Error ? (error.stack ?? error.message) : String(error)),
+        )
+      }
 
       const decision = await next()
 
-      // 别人已经判定 block 时，原样交回，不参与裁剪。
-      if (decision === undefined || decision === null || decision.kind !== 'accept') return decision
+      // ⚠️⚠️ 2026-11-07 修（R8，B3）：next() **之后**的裁剪段也必须整体包进 try/catch。
+      // 此前只有 next() 之前的 sync 包了 try，之后的裁剪段整体裸露 —— 任何异常
+      // （异常 result 结构 / content 里带抛错的 getter）都会 reject 整条 waterfall，
+      // 连带打掉宿主的 spill-policy / repeat-tool-reminder 后处理，而且也不是「原样放行」。
+      // 现在：异常一律 return decision（不裁剪、不改写），并用 logError 留痕（它自身不抛）。
+      try {
+        // 别人已经判定 block 时，原样交回，不参与裁剪。
+        if (decision === undefined || decision === null || decision.kind !== 'accept') return decision
 
-      // 只裁大脑自己的结果；队友的返回不受影响（他们要看到完整内容才能干活）。
-      if (agent === undefined || agent === null || isDelegatedChild(agent)) return decision
+        // 只裁大脑自己的结果；队友的返回不受影响（他们要看到完整内容才能干活）。
+        if (agent === undefined || agent === null || isDelegatedChild(agent)) return decision
 
-      // ⚠️ 必须判归属：会话切出 producer 之后（比如用户把主线切回 standard），
-      // 这个模块**仍然挂在这个会话上**（selftest D 组已证明 sync 会卸限制但不摘插件），
-      // 而裁剪逻辑没有对应的卸载动作。若不判 owner，standard 会话的主对话
-      // 会继续收到被压到 6000 B / 被改结构的结果 —— 静默数据丢失。
-      // （第 1 轮代码审计 2026-10-30 A-2，已核实。）
-      const ownerNow = ownerPresetId(ctx, agent, warn)
-      if (ownerNow !== presetId) return decision
+        // ⚠️ 必须判归属：会话切出 producer 之后（比如用户把主线切回 standard），
+        // 这个模块**仍然挂在这个会话上**（selftest D 组已证明 sync 会卸限制但不摘插件），
+        // 而裁剪逻辑没有对应的卸载动作。若不判 owner，standard 会话的主对话
+        // 会继续收到被压到 6000 B / 被改结构的结果 —— 静默数据丢失。
+        // （第 1 轮代码审计 2026-10-30 A-2，已核实。）
+        const ownerNow = ownerPresetId(ctx, agent, warn)
+        if (ownerNow !== presetId) return decision
 
-      const toolName = exec?.name
-      if (typeof toolName !== 'string' || TRIM_EXEMPT_TOOLS.has(toolName)) return decision
+        const toolName = exec?.name
+        if (typeof toolName !== 'string' || TRIM_EXEMPT_TOOLS.has(toolName)) return decision
 
-      // `value`（结构化结果）优先级高于 `content`，且两者不能同时由 accept 给出；
-      // 出现 `value` 说明下游已经重写过结果，交给它，不叠 content。
-      if (Object.hasOwn(decision, 'value')) return decision
+        // `value`（结构化结果）优先级高于 `content`，且两者不能同时由 accept 给出；
+        // 出现 `value` 说明下游已经重写过结果，交给它，不叠 content。
+        if (Object.hasOwn(decision, 'value')) return decision
 
-      const source = Object.hasOwn(decision, 'content') ? decision.content : result?.content
+        const source = Object.hasOwn(decision, 'content') ? decision.content : result?.content
 
-      // 任务板不再做结构化压缩。
-      //
-      // 原来这里有 146 行：把 team_task_* 的 JSON 按 description/prompt 逐级缩短，
-      // 再按任务条数二分截断。删掉的理由：
-      //   · 它解决的是「JSON 截断后不可解析」。但宿主 spill-policy 会**把全文落盘
-      //     并在通知里给出路径** —— 大脑拿不回来的问题根本不存在，它随时能让
-      //     队友去读那个文件，或者自己按 id 用 team_task_get 单取。
-      //   · 那 146 行维护的是「一份没人读的散文该保留多少字」，而不是任何可测目标。
-      //   · 任务板列表天然就小（实测最多次 KB，远低于阈值），这段代码几乎不触发。
-      // → 统一交给下面的兜底裁剪（通常也不会触发，因为 spill 先处理了）。
+        // 任务板不再做结构化压缩。
+        //
+        // 原来这里有 146 行：把 team_task_* 的 JSON 按 description/prompt 逐级缩短，
+        // 再按任务条数二分截断。删掉的理由：
+        //   · 它解决的是「JSON 截断后不可解析」。但宿主 spill-policy 会**把全文落盘
+        //     并在通知里给出路径** —— 大脑拿不回来的问题根本不存在，它随时能让
+        //     队友去读那个文件，或者自己按 id 用 team_task_get 单取。
+        //   · 那 146 行维护的是「一份没人读的散文该保留多少字」，而不是任何可测目标。
+        //   · 任务板列表天然就小（实测最多次 KB，远低于阈值），这段代码几乎不触发。
+        // → 统一交给下面的兜底裁剪（通常也不会触发，因为 spill 先处理了）。
 
-      // ── 兜底裁剪：两档阈值（N2 的修法）──────────────────────────────────
-      //
-      // ① 结果**没有** spill 落盘标记、却已经超过 spill 的触发点 → spill 没处理它
-      //    （被禁用 / config 缺失 / spillStore 缺失 / 它自己 throw 后 keeping inline），
-      //    用 `SPILL_FALLBACK_CHARS`（52,000 字符）兜底。
-      // ② 结果**有** spill 标记 → spill 已经把它无损落盘并裁到 ~12,500 token，
-      //    用 `maxResultChars`（默认 200,000 字符），正常情况下永不触发。
-      //
-      // 这样既不会在 spill 之前抢裁（N2），也不会在 spill 缺席时开出 50K~200K 字符的
-      // 裸奔通道。判据见 `looksSpilled()`：标记必须在**末尾**且整体以 `)` 收尾，
-      // 防止"正文里碰巧出现这句话"把阈值放宽成一个新洞。
-      const charsOf = (blocks) =>
-        Array.isArray(blocks)
-          ? blocks.reduce((sum, b) => sum + (b !== null && typeof b === 'object' && typeof b.text === 'string' ? b.text.length : 0), 0)
-          : 0
-      const sourceChars = charsOf(source)
-      const spillHandled =
-        Array.isArray(source) &&
-        looksSpilled(source.filter((b) => b !== null && typeof b === 'object' && typeof b.text === 'string').map((b) => b.text).join(''))
-      const effectiveMax = spillHandled
-        ? maxResultChars
-        : sourceChars > spillTriggerChars
-          ? Math.min(maxResultChars, spillFallbackChars)
-          : maxResultChars
+        // ── 兜底裁剪：两档阈值（N2 的修法）──────────────────────────────────
+        //
+        // ① 结果**没有** spill 落盘标记、却已经超过 spill 的触发点 → spill 没处理它
+        //    （被禁用 / config 缺失 / spillStore 缺失 / 它自己 throw 后 keeping inline），
+        //    用 `SPILL_FALLBACK_CHARS`（52,000 字符）兜底。
+        // ② 结果**有** spill 标记 → spill 已经把它无损落盘并裁到 ~12,500 token，
+        //    用 `maxResultChars`（默认 200,000 字符），正常情况下永不触发。
+        //
+        // 这样既不会在 spill 之前抢裁（N2），也不会在 spill 缺席时开出 50K~200K 字符的
+        // 裸奔通道。判据见 `looksSpilled()`：标记必须在**末尾**且整体以 `)` 收尾，
+        // 防止"正文里碰巧出现这句话"把阈值放宽成一个新洞。
+        const charsOf = (blocks) =>
+          Array.isArray(blocks)
+            ? blocks.reduce((sum, b) => sum + (b !== null && typeof b === 'object' && typeof b.text === 'string' ? b.text.length : 0), 0)
+            : 0
+        const sourceChars = charsOf(source)
+        const spillHandled =
+          Array.isArray(source) &&
+          looksSpilled(source.filter((b) => b !== null && typeof b === 'object' && typeof b.text === 'string').map((b) => b.text).join(''))
+        const effectiveMax = spillHandled
+          ? maxResultChars
+          : sourceChars > spillTriggerChars
+            ? Math.min(maxResultChars, spillFallbackChars)
+            : maxResultChars
 
-      // ⚠️ 2026-11-01：把该会话的团队状态传进去 —— 裁剪说明里的「派队友去取」
-      // 在 solo 会话里指向不存在的概念，必须换成「派代理」。
-      const trimmed = trimContent(source, toolName, effectiveMax, teamOn.get(agent) === true)
-      if (trimmed === undefined) return decision
+        // ⚠️ 2026-11-01：把该会话的团队状态传进去 —— 裁剪说明里的「派队友去取」
+        // 在 solo 会话里指向不存在的概念，必须换成「派代理」。
+        const trimmed = trimContent(source, toolName, effectiveMax, teamOn.get(agent) === true)
+        if (trimmed === undefined) return decision
 
-      // ⚠️ N1：裁剪决定一旦做出就**不再静默反悔**。裁不了也要用 error 记账。
-      if (trimmed.skipped !== undefined) {
-        if (sourceChars > effectiveMax) {
-          ctx.logger?.error?.(
-            `blackpig-guard: TRIM SKIPPED — a "${toolName}" result of ${sourceChars} chars exceeds the fallback limit ` +
-              `${effectiveMax} chars, but it could not be trimmed: ${trimmed.skipped}. ` +
-              `The FULL result is being passed through unchanged (${sourceChars} chars).`,
-          )
+        // ⚠️ N1：裁剪决定一旦做出就**不再静默反悔**。裁不了也要用 error 记账。
+        if (trimmed.skipped !== undefined) {
+          if (sourceChars > effectiveMax) {
+            logError(
+              `blackpig-guard: TRIM SKIPPED — a "${toolName}" result of ${sourceChars} chars exceeds the fallback limit ` +
+                `${effectiveMax} chars, but it could not be trimmed: ${trimmed.skipped}. ` +
+                `The FULL result is being passed through unchanged (${sourceChars} chars).`,
+            )
+          }
+          return decision
         }
+
+        // ⚠️ N7：文案不臆测上游。spill 处理过就直说"这是第二次裁剪"，
+        // 没处理过才说"这是 spill 之后的第二道保险"。
+        logInfo(
+          `blackpig-guard: trimmed a "${toolName}" result from ${trimmed.originalChars} chars to ${trimmed.keptChars} chars ` +
+            `(${trimmed.originalBytes} B → ${trimmed.keptBytes} B; limit ${effectiveMax} chars; ` +
+            `${trimmed.spillHandled ? 'spill-policy had already retained it, this is the second trim' : 'no spill retention mark was found, this is the fallback path'})`,
+        )
+        return withAdditionalContexts({ kind: 'accept', content: trimmed.content }, decision)
+      } catch (error) {
+        // 裁剪失败的取向与上游 sync 失败一致：吞在本层、原样放行、但不静默。
+        logError(
+          'blackpig-guard: trimming a tool result in tools/post-execute threw — ' +
+            'the upstream decision is passed through unchanged (no trim applied). Underlying error: ' +
+            (error instanceof Error ? (error.stack ?? error.message) : String(error)),
+        )
         return decision
       }
-
-      // ⚠️ N7：文案不臆测上游。spill 处理过就直说"这是第二次裁剪"，
-      // 没处理过才说"这是 spill 之后的第二道保险"。
-      ctx.logger?.info?.(
-        `blackpig-guard: trimmed a "${toolName}" result from ${trimmed.originalChars} chars to ${trimmed.keptChars} chars ` +
-          `(${trimmed.originalBytes} B → ${trimmed.keptBytes} B; limit ${effectiveMax} chars; ` +
-          `${trimmed.spillHandled ? 'spill-policy had already retained it, this is the second trim' : 'no spill retention mark was found, this is the fallback path'})`,
-      )
-      return withAdditionalContexts({ kind: 'accept', content: trimmed.content }, decision)
     },
     { prepend: true },
   )
@@ -2117,6 +3200,14 @@ export function apply(ctx, config) {
     'system-prompt/assemble',
     async (assembly, context, next) => {
       const decision = await next()
+      // ⚠️⚠️ 2026-11-07 修（R10，#7）：next() 之后的整段也必须包 try/catch。
+      // 同文件下方（guard-status 注入）的 assemble 监听早就是这样做的，注释写明
+      // 「注入失败不许打断组装」。这里原来只把 next() 放在外面，之后读 decision.tools
+      // 或 tools 元素上的 getter 一旦抛错，就会 reject 整条 system-prompt/assemble
+      // waterfall，而且零日志。现在：任何异常都原样返回 decision（不裁剪、不改写）
+      // 并记一条 error。正常路径输出逐字节不变。
+      // （try 内的原代码保持原缩进，便于与备份逐行对照。）
+      try {
       const agent = context?.agent ?? assembly?.agent
       if (agent === undefined || agent === null) return decision
 
@@ -2173,7 +3264,7 @@ export function apply(ctx, config) {
             const kept = tools.filter((tool) => tool?.name !== TEAMMATE_FORBIDDEN_TOOL)
             // 下限保护：绝不允许裁成空（理论上不可能，但守住 guard 的同一条规矩）。
             if (kept.length > 0) {
-              ctx.logger?.info?.(
+              logInfo(
                 `blackpig-guard: a teammate's request dropped the "${TEAMMATE_FORBIDDEN_TOOL}" schema ` +
                   `(team=${String(membership.name)}; a teammate can never spawn teammates)`,
               )
@@ -2215,7 +3306,7 @@ export function apply(ctx, config) {
       // 整轮瘫痪且没有告警。触发条件现实存在：插件重载、preset 切换中途的瞬时状态。
       // 宁可这一轮少裁几个，也不能让协调者变成哑巴。
       if (kept.length === 0) {
-        ctx.logger?.error?.(
+        logError(
           'blackpig-guard: the delivery-layer trim would have emptied the tool list ' +
             `(${tools.length} tool(s) all outside the keep-set) — keeping the original list for this request`,
         )
@@ -2226,20 +3317,122 @@ export function apply(ctx, config) {
 
       // ⚠️ 兜底生效了 —— 说明主路径（restrict 视图层）这次没挡住。
       // 这条日志是**诊断信号**，不是常规信息：正常情况下永远不该出现。
-      ctx.logger?.info?.(
+      logInfo(
         `blackpig-guard: delivery-layer trim dropped ${tools.length - kept.length} tool schema(s) from this request (assembly.tools ${tools.length} → ${kept.length})`,
       )
       warn(
-        'the delivery-layer trim (system-prompt/assemble) had to remove tool schemas from a request. ' +
+        `the delivery-layer trim (system-prompt/assemble) had to remove tool schemas from a request (scope=${agentScopeKeyOf(agent)}). ` +
           'That layer is only a FALLBACK: the host documents that listeners must not add or remove tools there, ' +
           'so a downstream listener may silently override it. The primary paths are tools.restrict() and ' +
           'tools.guard() — if this message appears, check whether the restriction actually installed for that session.',
+        agentScopeKeyOf(agent),
       )
       return { ...decision, tools: kept }
+      } catch (error) {
+        // 投递层裁剪失败不许打断组装（与下方 guard-status 注入监听同一取向），但必须留痕。
+        logError(
+          'blackpig-guard: trimming the delivered tool list in system-prompt/assemble threw — ' +
+            'the upstream decision is passed through unchanged (no trim applied). Underlying error: ' +
+            (error instanceof Error ? (error.stack ?? error.message) : String(error)),
+        )
+        return decision
+      }
     },
     { prepend: true },
   )
 
+  // ── 守卫未安装时：往 Lead 的首条上下文里放一条**有名字的**告警 ──────────────
+  //
+  // 改造二第 2 条要求「把守卫未安装这个事实写进一个可观测状态，供启动自检读取
+  // 并在 Lead 首条上下文里提示」。上面 sync() 已经写进 GUARD_INSTALL_STATUS；
+  // 这里把它变成模型**看得见**的一句话。
+  //
+  // 为什么必须让模型看见、而不只是写日志：guard 的 keep 白名单仍然在拒执行，
+  // 但**schema 层没挡住**时模型会看到 pwsh / write / edit 这些工具。如果它以为
+  // 「看得见 = 我可以用」，就会去调、被拒、然后按人格要求改派 —— 白烧一轮。
+  // 提前告诉它「这份可见面不可信、这些工具调了会被拒」，它就不会试。
+  //
+  // 三条克制：
+  //   · 只在 state !== 'engaged' 时注入（正常会话零额外 token）；
+  //   · 只注给**大脑**（队友走早退，不进这条）；
+  //   · 每个会话只注一次（用 WeakSet 记账，避免每轮重复刷上下文）。
+  const guardNoticeShown = new WeakSet()
+  ctx.on(
+    'system-prompt/assemble',
+    async (assembly, context, next) => {
+      // ⚠️ waterfall 契约：必须先 await next()，再在它给的 decision 上叠加。
+      const decision = await next()
+      try {
+        const agent = context?.agent ?? assembly?.agent
+        if (agent === undefined || agent === null) return decision
+        if (decision === undefined || decision === null || typeof decision !== 'object') return decision
+        if (isDelegatedChild(agent)) return decision
+        if (guardNoticeShown.has(agent)) return decision
+        const id = keyOf(agent)
+        if (id === undefined) return decision
+        const record = GUARD_INSTALL_STATUS.get(id)
+        if (record === undefined || record.state === GUARD_STATE_ENGAGED) return decision
+        // ⚠️ 2026-11-07 修（R5）：这里原来就 `guardNoticeShown.add(agent)`（在注入之前记账）。
+        // 记账已挪到注入成功之后（见下方 `injected` 之后那一处），此处不再记账。
+
+        // ⚠️⚠️ 2026-11-07 修（R16，BUG-2）：读不到工具面时状态里可能没有 deny 记录，
+        // 但那不等于「没有隐藏工具」。原来一律写 `(none submitted)`，是对模型的
+        // 假信息（实际可能仍有旧限制在生效）。现在按状态里的显式标记分流。
+        const list =
+          record.deny.length > 0
+            ? record.deny.slice(0, 12).join(', ')
+            : record.denyUnreadable === true
+              ? '(unknown — the current hidden set could not be read; do not assume nothing is hidden)'
+              : '(none submitted)'
+        const unknown = record.unknownNames.length > 0
+          ? ' Names the host refused to restrict: ' + record.unknownNames.join(', ') + '.'
+          : ''
+        const text =
+          `Black Pig guard is NOT fully engaged for this session (state: ${record.state}). ` +
+          'The tool list above may therefore be larger than what you are allowed to use: ' +
+          'tools outside the coordinator keep-list are still rejected at execution time, so do not try them — ' +
+          'delegate that work instead. ' +
+          `Hidden tools: ${list}.${unknown}` +
+          (typeof record.error === 'string' && record.error !== '' ? ` Host error: ${record.error}` : '')
+        const contexts = Array.isArray(decision.contexts) ? decision.contexts : []
+        // ⚠️⚠️ 2026-11-06（P0-3）纠正这里原来的错误注释：`required: true` **不能**保证
+        // 本注入在 runtime-context 抑制时存活。宿主实现是：
+        //   const requiredContexts = new Set([...contextByName.values()]
+        //     .filter(e => e.required === true).map(e => e.name))
+        //   ... contexts: runtimeContextSuppressed
+        //         ? transformed.contexts.filter(e => requiredContexts.has(e.name))
+        //         : transformed.contexts
+        // 而 `contextByName` 只含**通过 `systemPrompt.context()` 注册**的项；本注入直接追加进
+        // decision.contexts，不在其中，抑制态下会被整条过滤掉。
+        // 因此：**日志与 `guardInstallStatus()` 才是可观测性的主通道**，这条 context 只是
+        // 「没被抑制时」的额外提醒，绝不能当成唯一报警。
+        const entry = { name: 'blackpig-guard:install-status', order: 115, required: true, text }
+        // ⚠️ 2026-11-07 修（R9，优化 7）：原来这里外面还套了一层 try/catch，是**死代码** ——
+        // `logError` 自身已把 `ctx.logger?.error?.()` 包在 try/catch 里（见它的定义），
+        // 不可能把异常抛回这里，那层 catch 永远走不到。保留调用，去掉外壳。
+        logError(
+          `blackpig-guard: injecting the guard-status notice into the Lead prompt for session ${id} (state=${record.state})`,
+        )
+        const injected = { ...decision, contexts: [...contexts, entry] }
+        // ⚠️ 2026-11-07 修（R5）：记账必须在注入**确实成功之后**。原来它排在 logger 之前：
+        // logger 抛一次就落进下面的 catch 返回原 decision，而 agent 已经记账 →
+        // 该会话的「守卫未生效」提示**永不再注入**。现在失败不记账，下次 assemble 会重试。
+        guardNoticeShown.add(agent)
+        return injected
+      } catch (error) {
+        // 注入失败不许打断组装（那会让整轮请求失败），但必须响。
+        // ⚠️ 2026-11-07 修（R9，优化 7）：原来这里又套了一层 try/catch，同属**死代码** ——
+        // `logError` 自身已吞掉 logger 的任何异常（logger 恒抛也逃不出它），那层 catch
+        // 永远走不到。去掉外壳、保留调用：日志失败照样不把异常带出 waterfall 监听器。
+        logError(
+          'blackpig-guard: failed to inject the guard-status notice into the prompt: ' +
+            (error instanceof Error ? (error.stack ?? error.message) : String(error)),
+        )
+        return decision
+      }
+    },
+    { prepend: true },
+  )
   // ⚠️ 2026-11-01：`agent/pre-step` 监听已删除。
   //
   // 它唯一的作用是把 turn 号记进 `currentTurn`，供 read/grep 的「每轮探查预算」
@@ -2251,7 +3444,14 @@ export function apply(ctx, config) {
 
   // ── 切换路径：会话换了 preset 立刻重判归属 ──
   ctx.on('agent-preset/selected', (sessionId) => {
-    resync(sessionId)
+    try {
+      resync(sessionId)
+    } catch (error) {
+      logError(
+        'blackpig-guard: resync on agent-preset/selected threw — the previous restriction state was kept as-is. ' +
+          'Underlying error: ' + (error instanceof Error ? (error.stack ?? error.message) : String(error)),
+      )
+    }
   })
 
   // ── 工具面变化：兜底重判（tools/change 无参、无 scope 过滤）──
@@ -2259,11 +3459,50 @@ export function apply(ctx, config) {
   // 否则 sync 会自己触发自己。重入闸门见 `quietly` 的注释。
   ctx.on('tools/change', () => {
     if (echoing) return
-    resync(undefined)
+    try {
+      resync(undefined)
+    } catch (error) {
+      // tools/change 是无 scope 过滤的广播，抛错会波及所有监听者。
+      logError(
+        'blackpig-guard: resync on tools/change threw — restriction state may be stale until the next sync. ' +
+          'Underlying error: ' + (error instanceof Error ? (error.stack ?? error.message) : String(error)),
+      )
+    }
   })
 
   // ── 释放：agent 离开时必须卸掉限制（scope key 会被回收复用）──
-  ctx.on('agent/disposed', ({ agent }) => {
-    release(agent)
+  ctx.on('agent/disposed', (payload) => {
+    // `GUARD_INSTALL_STATUS` 的键与 `release()` 用的是同一个 sessionId（见 `keyOf`）。
+    // 会话结束后必须删掉**自己那一条**：否则 Map 随会话数无界增长，且 id 被复用时
+    // `guardInstallStatus()` 会读到上一条 degraded/unprotected 记录，误判并永久注入
+    // 「守卫未生效」提示。只删本 agent 的键，其他 agent 的状态不动。
+    // ⚠️ 2026-11-07 修（R6，B-1）：`keyOf` 是 `agent.session.id ?? agent.id`，
+    // 而 disposed 时 `session` 可能已被拆掉 → 取到的是 `agent.id`，删的是**另一个键**，
+    // 建状态时用的 `session.id` 就永久留在模块级 Map 里（实测 STALE ENTRY REMAINS）。
+    // 所以不能只删 `keyOf` 的结果：两个候选键各自有值就都删。
+    // ⚠️ 2026-11-07（R9，优化 6）：候选键的收集抽成 `statusKeysFor(agent)`，与「切走
+    // preset」那段同源（原先两处逐字重复）。先收集、再 release、最后删 —— 顺序不变。
+    // ⚠️ 2026-11-07 修（R14，BUG-1）：同 agent/created —— 参数**不解构**，取 payload 与判空
+    // 都放在 try 内；畸形载荷（undefined / null / {}）直接 return，绝不从这里抛出截断
+    // ctx.serial 的后续监听（含 member-persona 的人格注入）。
+    try {
+      const agent = payload?.agent
+      if (agent === undefined || agent === null) return
+      const statusKeys = statusKeysFor(agent)
+      try {
+        release(agent)
+      } catch (error) {
+        logError(
+          'blackpig-guard: releasing a disposed agent threw — a stale restriction may outlive the session. ' +
+            'Underlying error: ' + (error instanceof Error ? (error.stack ?? error.message) : String(error)),
+        )
+      }
+      for (const statusKey of statusKeys) GUARD_INSTALL_STATUS.delete(statusKey)
+    } catch (error) {
+      logError(
+        'blackpig-guard: handling agent/disposed threw — the disposed agent may keep a stale restriction or status entry. ' +
+          'Underlying error: ' + (error instanceof Error ? (error.stack ?? error.message) : String(error)),
+      )
+    }
   })
 }

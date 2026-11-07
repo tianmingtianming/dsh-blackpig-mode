@@ -25,9 +25,8 @@
  *
  * ── 为什么零 import（本包预设内模块的硬约定）────────────────────────────────
  *
- * 本 preset 内的模块一律**零同名 import**（本目录现有 5 个：roster / guard /
- * member-persona / subtalk / file-info，各自独立）。
- * 本模块照做，代价是常量表要自己留一份（例如工具名），收益是不会把
+ * 本模块自身零 import；包内仅 subtalk → compat 一条相对引用（本目录现有 6 个 .mjs）。
+ * 代价是常量表要自己留一份（例如工具名），收益是不会把
  * `@deepseek-ai/*` 变成 preset 模块图的**硬依赖**：导入失败 = 整份 preset 挂载失败。
  *
  * ── 为什么不用 `node:fs`（这是安全取向，不是风格洁癖）────────────────────────
@@ -98,7 +97,7 @@ export const name = 'blackpig-file-info'
  * `apply()` 里仍保留一条运行期兜底检查（测试桩 / 局部挂载会绕过 inject），
  * 见下。
  */
-export const inject = ['tools', 'fs']
+export const inject = ['tools', 'fs', 'workingDirectory']
 
 /**
  * 模型面工具名。
@@ -302,26 +301,119 @@ function parsePaths(args) {
 }
 
 /**
- * 本次调用所属会话的工作目录。
+ * 本次调用所属会话的**当前**工作目录。
  *
- * 与 `dsh-tool-fs` 的 `sessionCwd()` 同款（`dsh-tool-fs/lib/index.js:173-175`）：
- * 取 `exec.agent.session.header.cwd`。取不到就返回 undefined，由后端套用它自己的默认值。
- * 包一层 try 是因为测试桩可以给出任意形状的 exec。
+ * ⚠️ 2026-11-07 修（R13b2，BUG-1）：旧实现只读 `exec.agent.session.header.cwd`，
+ * 那是**启动时**的快照。宿主 `dsh-working-directory` 的 `commit()` 只 append
+ * `working-directory/change` 事件，**从不回写** `header.cwd`；而 `read` / `write` /
+ * `edit` 解析相对路径用的是 `ctx.workingDirectory.ensure(...)` 的投影结果
+ * （在 `dsh-tool-fs` 里 `header.cwd` 与 `sessionCwd` 命中 0）。于是用户 `cd` 之后，
+ * 本工具与 `read/write/edit` 会把同一个相对路径解析到**不同文件**，本工具还会把
+ * 结果静默报成 `missing`。
+ *
+ * 优先级（取到即停）：
+ *   1. `ctx.workingDirectory.ensure(exec.agent, exec.signal)` —— 与宿主同源，`cd` 后仍一致；
+ *   2. 取不到（服务缺失 / 抛错 / 未给出非空字符串）→ 退回 `header.cwd`，保持向后兼容；
+ *   3. 两者皆无 → undefined，由后端套用它自己的默认值。
+ *
+ * 每层都包 try：测试桩可以给出任意形状的 exec，日志与兜底绝不能反过来炸掉工具。
  *
  * @param exec - 当前工具执行上下文。
- * @returns 会话 cwd，或 undefined。
+ * @param ctx - preset scope 的插件上下文（`ctx.workingDirectory` 挂在它上面）。
+ * @returns 当前 cwd，或 undefined。
  */
-function sessionCwd(exec) {
+async function sessionCwd(exec, ctx) {
+  // ① 宿主同源：`working-directory` 的投影值（`cd` 之后只有它是对的）。
+  // ⚠️ R13c：Cordis 的 ctx 是 Proxy，读**未在 inject 里声明**的服务会直接抛错
+  // （cannot get property ... without inject），而本行原来在 try 之外 ——
+  // 一旦抛错就冲掉整个 execute，:352 的 header.cwd 兜底永远到不了（致命）。
+  // 现在把这次读取也放进 try：未注入/不可用时静默降级，继续走后面的兜底。
+  let candidates = []
   try {
-    return exec?.agent?.session?.header?.cwd
+    candidates = [ctx?.workingDirectory]
+  } catch {
+    // 未注入该服务时静默降级，继续走 agent 的 workingDirectory → header.cwd。
+  }
+  try {
+    const agentWorkingDirectory = exec?.agent?.ctx?.workingDirectory
+    if (agentWorkingDirectory !== undefined && agentWorkingDirectory !== null) candidates.push(agentWorkingDirectory)
+  } catch {
+    // agent.ctx 取值抛错：只走 ctx 这一层。
+  }
+  for (const workingDirectory of candidates) {
+    if (workingDirectory === undefined || workingDirectory === null) continue
+    try {
+      if (typeof workingDirectory.ensure !== "function") continue
+      const current = await workingDirectory.ensure(exec?.agent, exec?.signal)
+      // ⚠️ 2026-11-07 修（R15b，BUG-B）：只判空串不 trim，`ensure()` 返回 "   " 时被当成
+      // 合法 cwd 写进 `options.cwd`（实测 `{"cwd":"   "}`），与同文件 `parsePaths`(:296)、
+      // roster `selfPresetId` 的 trim 口径不一致。现在 trim 后判空；返回值仍是**原值**
+      // （不 trim —— 路径里的空格是合法内容），trim 只用于空判。正常非空 cwd 逐字节不变。
+      if (typeof current === "string" && current.trim() !== "") return current
+      // 个别实现回 { cwd } 形状：只认明确的字符串字段，其余一律当「取不到」。
+      if (current !== null && typeof current === "object") {
+        const nested = current.cwd
+        if (typeof nested === "string" && nested.trim() !== "") return nested
+      }
+    } catch {
+      // 服务抛错 → 换下一个来源，最后退回 header.cwd。
+    }
+  }
+
+  // ② 向后兼容：启动时的 header.cwd（未接 workingDirectory 服务的部署 / 测试桩）。
+  // ⚠️ 2026-11-07 修（R16b，BUG-B）：这一半原来**没有**类型/空白校验，直接把 header 里的值
+  // 原样返回 —— `""` / `"   "` / `null` / 数字都会塞进 `options.cwd`（实测 `{"cwd":""}`、
+  // `{"cwd":null}`、`{"cwd":123}`），把后端的默认 cwd 顶掉，相对路径解析错位或直接报错。
+  // 上面 `ensure()` 那一半（R15b）早已是 `typeof === 'string' && trim() !== ''` 口径，这里现在
+  // 与它对齐：只有非空白字符串才返回，否则 undefined（调用方据此**不写** options.cwd）。
+  // 返回值仍是**原值**（不 trim —— 路径里的空格是合法内容）；正常 cwd 逐字节不变。
+  try {
+    const headerCwd = exec?.agent?.session?.header?.cwd
+    if (typeof headerCwd === 'string' && headerCwd.trim() !== '') return headerCwd
+    return undefined
   } catch {
     return undefined
   }
 }
 
-/** XML 属性值转义 —— 路径里出现 `&` / `<` / `"` 时不能让渲染出的文本变成畸形结构。 */
+/**
+ * XML 属性值转义 —— 路径里出现 `&` / `<` / `"` 时不能让渲染出的文本变成畸形结构。
+ *
+ * ⚠️ 2026-11-07 修（R12，#2）：原来只转义 4 个字符，`note` 里一旦带上异常消息的
+ * `\r\n` / `\t`，属性值里就会出现裸换行，渲染出的 XML 被拆成多行、结构断裂。
+ * 现在 CR / LF / TAB 一律改成数字引用（`&#13;` / `&#10;` / `&#9;`），其它行分隔符
+ * 与不可见控制字符也做处理，保证属性值永远落在单行。没有控制字符的普通文本
+ * 逐字节不变。
+ */
 function escapeAttribute(text) {
-  return String(text).replace(/&/gu, '&amp;').replace(/</gu, '&lt;').replace(/>/gu, '&gt;').replace(/"/gu, '&quot;')
+  return String(text)
+    .replace(/&/gu, '&amp;')
+    .replace(/</gu, '&lt;')
+    .replace(/>/gu, '&gt;')
+    .replace(/"/gu, '&quot;')
+    .replace(/[\u0000-\u001F\u007F\u0085\u2028\u2029]/gu, (char) => {
+      if (char === '\r') return '&#13;'
+      if (char === '\n') return '&#10;'
+      if (char === '\t') return '&#9;'
+      // 0x7F 与 U+0085 / U+2028 / U+2029 是行分隔或不可见字符，改成数字引用以保持单行。
+      // 其余 C0 控制字符（0x00-0x08、0x0B、0x0C、0x0E-0x1F）在 XML 1.0 里连字符引用
+      // 都不合法，替换成 U+FFFD，保证属性值仍是单行、仍是合法 XML。
+      if (char === '\u007F' || char === '\u0085' || char === '\u2028' || char === '\u2029') {
+        return `&#${char.codePointAt(0)};`
+      }
+      return '\uFFFD'
+    })
+}
+
+function makeEntry(requestedPath, resolvedPath, status, sizeKnown, note, sizeBytes) {
+  return {
+    requestedPath,
+    resolvedPath,
+    status,
+    sizeKnown,
+    ...(note === undefined ? {} : { note }),
+    ...(sizeBytes === undefined ? {} : { sizeBytes }),
+  }
 }
 
 /**
@@ -343,13 +435,13 @@ async function inspectOne(fs, requestedPath, options, signal) {
   try {
     target = await fs.resolve(requestedPath, options)
   } catch (error) {
-    return {
+    return makeEntry(
       requestedPath,
-      resolvedPath: requestedPath,
-      status: 'error',
-      sizeKnown: false,
-      note: `could not resolve this path: ${error instanceof Error ? error.message : String(error)}`,
-    }
+      requestedPath,
+      'error',
+      false,
+      `could not resolve this path: ${error instanceof Error ? error.message : String(error)}`,
+    )
   }
 
   const resolvedPath = typeof target?.displayPath === 'string' && target.displayPath !== '' ? target.displayPath : requestedPath
@@ -358,65 +450,47 @@ async function inspectOne(fs, requestedPath, options, signal) {
   try {
     info = await fs.stat(target, signal)
   } catch (error) {
-    return {
+    return makeEntry(
       requestedPath,
       resolvedPath,
-      status: 'error',
-      sizeKnown: false,
-      note: `could not stat this path: ${error instanceof Error ? error.message : String(error)}`,
-    }
+      'error',
+      false,
+      `could not stat this path: ${error instanceof Error ? error.message : String(error)}`,
+    )
   }
 
   // 缺席的**申报方式**就是 `undefined`（`dsh-tool-fs/lib/index.js:205`），不是抛错。
   if (info === undefined || info === null) {
-    return {
-      requestedPath,
-      resolvedPath,
-      status: 'missing',
-      sizeKnown: false,
-      note: 'no such path (absent — this is not a zero-byte file)',
-    }
+    return makeEntry(requestedPath, resolvedPath, 'missing', false, 'no such path (absent — this is not a zero-byte file)')
   }
 
   if (info.type === 'directory') {
-    return {
-      requestedPath,
-      resolvedPath,
-      status: 'directory',
-      sizeKnown: false,
-      note: 'a directory has no meaningful byte count',
-    }
+    return makeEntry(requestedPath, resolvedPath, 'directory', false, 'a directory has no meaningful byte count')
   }
 
   if (info.type !== 'file') {
-    return {
+    return makeEntry(
       requestedPath,
       resolvedPath,
-      status: 'other',
-      sizeKnown: false,
-      note: `the backend reports this as "${String(info.type)}", neither a regular file nor a directory`,
-    }
+      'other',
+      false,
+      `the backend reports this as "${String(info.type)}", neither a regular file nor a directory`,
+    )
   }
 
   const size = info.size
   if (typeof size !== 'number' || !Number.isFinite(size) || size < 0) {
     // ⚠️ 这一支就是「不要编一个 0」的落点。`size` 是可选字段，provider 可以不报。
-    return {
+    return makeEntry(
       requestedPath,
       resolvedPath,
-      status: 'file',
-      sizeKnown: false,
-      note: 'the filesystem backend did not report a byte size for this file — the size is UNKNOWN, not 0',
-    }
+      'file',
+      false,
+      'the filesystem backend did not report a byte size for this file — the size is UNKNOWN, not 0',
+    )
   }
 
-  return {
-    requestedPath,
-    resolvedPath,
-    status: 'file',
-    sizeKnown: true,
-    sizeBytes: Math.trunc(size),
-  }
+  return makeEntry(requestedPath, resolvedPath, 'file', true, undefined, Math.trunc(size))
 }
 
 /**
@@ -547,7 +621,8 @@ export function apply(ctx, config) {
         // 入参非法 ⇒ 抛出（流水线会收成 `isError: true` 的工具结果）。见 parsePaths 的注释。
         const paths = parsePaths(args)
 
-        const cwd = sessionCwd(exec)
+        // ⚠️ R13b2/BUG-1：改为 await 宿主同源的 workingDirectory 投影；取不到时仍退回 header.cwd。
+        const cwd = await sessionCwd(exec, ctx)
         const signal = exec?.signal
         // 与 `dsh-tool-fs` 的 `sessionResolveOptions()` 同构：只在**有值**时才带上该键，
         // 不写 `cwd: undefined`（后者会让后端的默认值被一个显式的 undefined 顶掉）。
@@ -559,13 +634,7 @@ export function apply(ctx, config) {
         for (const requestedPath of paths) {
           // 已取消就不再逐个 stat：剩下的如实标成「没查」，不假装查过。
           if (signal?.aborted === true) {
-            entries.push({
-              requestedPath,
-              resolvedPath: requestedPath,
-              status: 'error',
-              sizeKnown: false,
-              note: 'not inspected: this call was aborted',
-            })
+            entries.push(makeEntry(requestedPath, requestedPath, 'error', false, 'not inspected: this call was aborted'))
             continue
           }
           entries.push(await inspectOne(fs, requestedPath, options, signal))
@@ -574,13 +643,27 @@ export function apply(ctx, config) {
         return { entries, totals: totalsOf(entries) }
       },
     })
-    ctx.logger?.info?.(
-      `blackpig-model/file-info: ${ENGAGED} — registered read-only tool "${TOOL_NAME}" on ctx.fs.resolve()+stat()`,
-    )
   } catch (error) {
     // 注册失败必须响亮：本模块是「shell 之外的第二条路」，装不上等于 D5 没解决。
     warn(
       `${SKIPPED} reason=register-failed — ${error instanceof Error ? error.message : String(error)}`,
+    )
+    return
+  }
+
+  // ⚠️ 2026-11-07 修（R6，B-7）：日志与注册动作**分开**。走到这里说明
+  // `ctx.tools.register()` 已经正常返回，工具确实注册成功；此时 `logger.info`
+  // 抛错只能说明「日志通道异常」，绝不能落进上面的 register-failed 把结论翻成
+  // 「没注册」（member-persona:243-248 已明确禁止这种取向）。
+  try {
+    ctx.logger?.info?.(
+      `blackpig-model/file-info: ${ENGAGED} — registered read-only tool "${TOOL_NAME}" on ctx.fs.resolve()+stat()`,
+    )
+  } catch (error) {
+    // 只在日志通道再记一条（warn 内部同样吞异常）。业务结论不变：注册成功。
+    warn(
+      `the read-only tool "${TOOL_NAME}" WAS registered, but the info log threw (log channel failure): ` +
+        `${error instanceof Error ? error.message : String(error)}`,
     )
   }
 }

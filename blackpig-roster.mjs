@@ -93,10 +93,94 @@ const OUTPUT_SCHEMA = {
   required: ['ok', 'message'],
 }
 
-/** 只渲染 `message`；结构化字段留给程序消费，重复贴一遍等于同一段字花两份 token。 */
+/**
+ * 渲染回执：以 `message` 为主体，只**追加**调用方必须看见的结构化信息。
+ *
+ * ⚠️ 2026-11-07 修（R11，BUG-2）：原来只渲染 `message`，把 `nextAction` / `stop` /
+ * `degraded` / `reason` 全部丢掉。工具 description 却向模型承诺「`stop: true` 意味着
+ * 不要重试」，而 `unknown-preset` 拒绝后**唯一可执行的路**（`nextAction` 里的候选 id）
+ * 根本不可见。现在按固定顺序追加：reason → next → stop → degraded。只输出这几个必要
+ * 字段，不把整个回执对象 JSON 倒出来（token 预算）；没有这些字段时输出与改前逐字节一致。
+ *
+ * ⚠️ 2026-11-07 修（R13b，BUG-A）：`degraded` 原来原样追加、条目数不受 `rosterMaxBytes`
+ * 约束（40 个空模式 cap=200 时正文 167 B、交付文本 1544 B）。现在 degraded 也计入同一个
+ * 硬顶：完整列表装得下时与改前逐字节一致，否则从尾部折叠成 `(+K more)`。
+ * 没有 degraded 时，**未超顶**的输出仍与改前逐字节一致（R15b：主路径现在也过同一硬顶）。
+ */
 
-function render(_args, value) {
-  return [{ type: 'text', text: String(value?.message ?? '') }]
+function render(_args, value, capBytes = ROSTER_HARD_CAP_BYTES) {
+  const message = String(value?.message ?? '')
+  const extra = []
+  if (typeof value?.reason === 'string' && value.reason !== '') extra.push('reason: ' + value.reason)
+  if (typeof value?.nextAction === 'string' && value.nextAction !== '') extra.push('next: ' + value.nextAction)
+  if (value?.stop === true) extra.push('stop: do not retry')
+  const body = extra.length === 0 ? message : message === '' ? extra.join('\n') : message + '\n' + extra.join('\n')
+  const cap =
+    typeof capBytes === 'number' && Number.isFinite(capBytes) && capBytes > 0 ? Math.floor(capBytes) : ROSTER_HARD_CAP_BYTES
+  const degraded = Array.isArray(value?.degraded) ? value.degraded.map((item) => String(item)) : []
+  if (degraded.length === 0) {
+    // ⚠️ 2026-11-07 修（R15b，BUG-A）：无 degraded 的主路径原来直接返回 body，`capBytes` 只在下面
+    // 的 degraded 分支生效 —— `ask: true` 的 200 KB 自述、500 个候选 id 的 nextAction（16,958 B）
+    // 都原样交付，`rosterMaxBytes` 对主路径完全不设防。现在主路径也过同一个硬顶：
+    //   未超顶 → 逐字节原样返回（与改前一致）；超顶 → 码点安全裁剪 + 同一个 ` …` 后缀。
+    if (bytes(body) <= cap) return [{ type: 'text', text: body }]
+    const suffix = ' …'
+    const suffixBytes = bytes(suffix)
+    const head = clipToBytes(body, Math.max(0, cap - suffixBytes))
+    if (head !== '') return [{ type: 'text', text: head + suffix }]
+    // cap 小于后缀本身：退回一条能塞进 cap 的最短非空提示（既不超顶，也不返回空内容）。
+    for (const hint of ['…', '..', '.']) {
+      if (bytes(hint) <= cap) return [{ type: 'text', text: hint }]
+    }
+    return [{ type: 'text', text: '' }]
+  }
+  const degradedLine = (shown, omitted) =>
+    shown === ''
+      ? 'degraded: (' + degraded.length + ' item(s) folded)'
+      : 'degraded: ' + shown + (omitted > 0 ? ' (+' + omitted + ' more)' : '')
+  // ① 先试完整列表（逐字节同改前），再逐条折叠，保留尽可能多的条目。
+  for (let keep = degraded.length; keep >= 1; keep -= 1) {
+    const candidate =
+      (body === '' ? '' : body + '\n') + degradedLine(degraded.slice(0, keep).join(', '), degraded.length - keep)
+    if (bytes(candidate) <= cap) return [{ type: 'text', text: candidate }]
+  }
+  // ② 一条都放不下 → 只留「有 N 条被折叠」这句（degraded 仍可见）。
+  const markerCandidates = [
+    degradedLine('', 0),
+    'degraded: +' + degraded.length,
+    'degraded: ' + degraded.length,
+    'degraded',
+  ]
+  let marker = ''
+  for (const candidate of markerCandidates) {
+    if (bytes(candidate) <= cap) {
+      marker = candidate
+      break
+    }
+  }
+  if (marker === '') marker = clipToBytes('degraded', cap) || '.'
+  // ③ 连「正文 + 折叠标记」都装不下（cap 极小，或正文本身超顶）→ 只从正文**尾部**让字节：
+  //    优先保住开头的标题/结论，硬顶绝不突破。
+  const headBudget = cap - bytes(marker) - 1
+  let head = body
+  if (headBudget <= 0) {
+    head = ''
+  } else if (bytes(head) > headBudget) {
+    const SUFFIX = ' …'
+    const suffixBytes = bytes(SUFFIX)
+    const budget = Math.max(0, headBudget - suffixBytes)
+    let used = 0
+    let cut = 0
+    for (const ch of head) {
+      const b = bytes(ch)
+      if (used + b > budget) break
+      used += b
+      cut += ch.length
+    }
+    head = head.slice(0, cut) + (cut > 0 && suffixBytes <= headBudget ? SUFFIX : '')
+  }
+  const text = head === '' ? marker : head + '\n' + marker
+  return [{ type: 'text', text }]
 }
 
 /**
@@ -122,6 +206,51 @@ function warnOnceFactory(ctx) {
 const bytes = (text) => Buffer.byteLength(String(text), 'utf8')
 
 /**
+ * 把文本收紧到字节硬顶以内（短文本**逐字节原样返回**）。
+ *
+ * ⚠️ 2026-11-07 修（R8，#2）：`readPresetDetail` 的失败文案原来不过上限，
+ * 3000 字符的注册表错误会原样注入（detailMaxBytes=100 实测 3020 B）。
+ * 正常 detail 路径与失败文案现在共用这同一个收口。
+ */
+function clipToBytes(text, maxBytes) {
+  if (Buffer.byteLength(text, 'utf8') <= maxBytes) return text
+  const clipped = []
+  let clippedBytes = 0
+  for (const ch of text) {
+    const b = Buffer.byteLength(ch, 'utf8')
+    if (clippedBytes + b > maxBytes) break
+    clippedBytes += b
+    clipped.push(ch)
+  }
+  return clipped.join('')
+}
+
+function truncateWithSuffix(text, cap) {
+  // ⚠️ BUG-A（第四轮复核抓到，P2）：**预留字节必须按实际后缀算**。
+  //
+  //   原来写 `capBytes - 2`，但追加的后缀 `" …"` 是 **4 字节**
+  //   （空格 1 + U+2026 省略号 3）。于是 cap ∈ {3..44, 46..47} 时
+  //   输出 `cap + 2` 字节 —— **硬顶被突破**。
+  //
+  //   R-7e 当时抽样的 [80,150,300,...] 恰好全部绕开这个区间，所以测试没抓到。
+  //   现在：后缀字节数用常量算出来，且**后缀本身装不下时就不加后缀**
+  //   （宁可输出空串/纯截断，也不突破硬顶 —— 硬顶是契约）。
+  const SUFFIX = " …"
+  const suffixBytes = bytes(SUFFIX)
+  const budget = Math.max(0, cap - suffixBytes)
+  let used = 0
+  let cut = 0
+  for (const ch of text) {
+    const b = bytes(ch)
+    if (used + b > budget) break
+    used += b
+    cut += ch.length
+  }
+  // 只有真的截出了内容、且后缀装得下时才加后缀。
+  return text.slice(0, cut) + (cut > 0 && suffixBytes <= cap ? SUFFIX : "")
+}
+
+/**
  * 从一次 `caller` 交付的代理结果里抽出它的文本。
  *
  * 为什么需要它：`startActivation({ delivery: 'caller' })` 的结果形态是
@@ -145,7 +274,11 @@ function extractProbeText(value) {
   if (typeof value === 'string') return value.trim()
   if (Array.isArray(value)) return fromBlocks(value)
   if (value === null || typeof value !== 'object') return ''
-  const direct = fromBlocks(value.output)
+  // `output` 也可能直接是字符串（不同 backend 没有统一契约）：走与 text/message/content
+  // 相同的字符串路径，否则 {output:'a,b'} 会被判成空文本。
+  const output = value.output
+  if (typeof output === 'string' && output.trim() !== '') return output.trim()
+  const direct = fromBlocks(output)
   if (direct !== '') return direct
   for (const key of ['text', 'message', 'content']) {
     const candidate = value[key]
@@ -169,11 +302,34 @@ async function readPresetDetail(registry, id, maxBytes = DETAIL_MAX_BYTES) {
     document = await registry.readDocument(id)
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
-    return { ok: false, reason: 'detail-unreadable', message: `Reading "${id}" failed: ${message}` }
+    // 失败文案同样受 detailMaxBytes 硬顶约束（与正常 detail 路径同一个收口）。
+    // ⚠️ 2026-11-07 修（R11，与 BUG-1 同构）：原来直接 clipToBytes 切片，截断后不留任何记号 ——
+    // 模型会看到半句错误原因，并以为那就是完整原因（正常 detail 路径有 fullNotice 说明，两条路径不对称）。
+    // 现在截断时先预留一条可见的省略说明、再裁正文，总字节仍 ≤ maxBytes；未截断时逐字节不变。
+    const failureText = `Reading "${id}" failed: ${message}`
+    if (Buffer.byteLength(failureText, 'utf8') <= maxBytes) {
+      return { ok: false, reason: 'detail-unreadable', message: failureText }
+    }
+    // 说明从详到简；只有严格小于 cap（至少给正文留 1 B）才采用，都放不下就纯截断（物理下限）。
+    let truncationNotice = ''
+    for (const notice of [
+      '\n\n[… truncated: ' + (Buffer.byteLength(failureText, 'utf8') / 1024).toFixed(1) + ' KB total]',
+      '\n\n[… truncated]',
+      ' …',
+    ]) {
+      if (Buffer.byteLength(notice, 'utf8') < maxBytes) { truncationNotice = notice; break }
+    }
+    const noticeBytes = Buffer.byteLength(truncationNotice, 'utf8')
+    return {
+      ok: false,
+      reason: 'detail-unreadable',
+      message: clipToBytes(failureText, maxBytes - noticeBytes) + truncationNotice,
+    }
   }
   const content = document?.content
   if (typeof content !== 'string' || content === '') {
-    return { ok: false, reason: 'detail-empty', message: `"${id}" declares no plugins.` }
+    // 2026-11-07 修（R9，#1）：与 detail-unreadable 共用同一个字节硬顶收口。
+    return { ok: false, reason: 'detail-empty', message: clipToBytes(`"${id}" declares no plugins.`, maxBytes) }
   }
 
   // ⚠️ 2026-11-02 加（第四轮复核点名要查的边界，实测发现）：原来这里**没有任何上限**，
@@ -186,6 +342,33 @@ async function readPresetDetail(registry, id, maxBytes = DETAIL_MAX_BYTES) {
   const fullBytes = Buffer.byteLength(content, 'utf8')
   if (fullBytes <= maxBytes) return { ok: true, text: content }
 
+  // ⚠️ 2026-11-07 修（R6，B-3）：`maxBytes` 必须是**返回总字节**的硬顶。
+  // 原来它只约束正文截断点，截断说明（约 200 B）无上限追加 → content 2000 B /
+  // maxBytes=1000 实测返回 1206 B。现在**先从正文预算里预留说明的字节**，
+  // 说明本身放不下就退化成更短的后缀，再放不下就纯截断（不加说明）。
+  // 正常路径（无截断）保持不变：上面的 early return 一字未动。
+  const kb = (n) => (n / 1024).toFixed(1)
+  const fullNotice = (shownBytes) =>
+    '\n\n[... truncated by blackpig-roster: this declaration is ' + kb(fullBytes) + ' KB; ' +
+    'only the first ' + kb(shownBytes) + ' KB is shown. ' +
+    "Use `ask: true` for a cheap capability answer, or read the mode's preset file directly if you need the rest.]"
+  // 预留按 maxBytes 算出的**最长**说明：实际 shownBytes ≤ maxBytes，kb() 的位数不会更长。
+  let noticeOf = fullNotice
+  let reserve = Buffer.byteLength(fullNotice(maxBytes), 'utf8')
+  if (reserve >= maxBytes) {
+    // 连完整说明都放不下 → 换短后缀；短后缀也放不下 → 纯截断。
+    const shortNotice = (shownBytes) => '\n\n[… truncated, ' + kb(shownBytes) + ' KB shown]'
+    const shortReserve = Buffer.byteLength(shortNotice(maxBytes), 'utf8')
+    if (shortReserve < maxBytes) {
+      noticeOf = shortNotice
+      reserve = shortReserve
+    } else {
+      noticeOf = () => ''
+      reserve = 0
+    }
+  }
+  const bodyBudget = Math.max(0, maxBytes - reserve)
+
   // 按 **code point** 累加（不是按 UTF-16 码元），否则代理对会被算成 2 个字符、
   // 每个 3 字节（= 6 字节），而实际一个 emoji 只有 4 字节 —— 会少截近一半。
   // 实测：'🎬'.repeat(10)\ 限 12 字节，按码元迭代只给 2 个 emoji（应为 3 个）。
@@ -195,19 +378,26 @@ async function readPresetDetail(registry, id, maxBytes = DETAIL_MAX_BYTES) {
   let consumedUtf16 = 0
   for (const ch of Array.from(content)) {
     const chBytes = Buffer.byteLength(ch, 'utf8')
-    if (used + chBytes > maxBytes) { cut = consumedUtf16; break }
+    if (used + chBytes > bodyBudget) { cut = consumedUtf16; break }
     used += chBytes
     consumedUtf16 += ch.length
   }
-  const kb = (n) => (n / 1024).toFixed(1)
-  return {
-    ok: true,
-    text:
-      content.slice(0, cut) +
-      '\n\n[... truncated by blackpig-roster: this declaration is ' + kb(fullBytes) + ' KB; ' +
-      'only the first ' + kb(used) + ' KB is shown. ' +
-      "Use `ask: true` for a cheap capability answer, or read the mode's preset file directly if you need the rest.]",
+  const text = content.slice(0, cut) + noticeOf(used)
+  // 最后一道防御：即使上面的字节算术被将来的改动作出偏差，也绝不突破硬顶。
+  // 与失败分支共用 clipToBytes：正常未截断的短文本仍逐字节原样返回。
+  //
+  // 2026-11-07 修（R9，#2）：clipToBytes 在「首字符字节数 > cap」时会返回空串，
+  // 而调用方仍回 ok:true —— CJK 声明在 cap=1/2 时拿到空 message，ASCII 同 cap 却拿到 "A"。
+  // 照 R8#5 的 ensureNonEmpty 同法：cap 装不下正文时退回一条**能塞进 cap**的最短非空提示，
+  // 不改变成功语义；正常 cap 下（clipToBytes 非空）输出逐字节不变。
+  const nonEmptyDetailFallback = () => {
+    for (const hint of ['(declaration omitted: detailMaxBytes too small)', '(omitted)', '…', '..', '.']) {
+      if (Buffer.byteLength(hint, 'utf8') <= maxBytes) return hint
+    }
+    return ''
   }
+  const clipped = clipToBytes(text, maxBytes)
+  return { ok: true, text: clipped === '' ? nonEmptyDetailFallback() : clipped }
 }
 /**
  * 名册数据源：`compositionInventory()`。
@@ -353,7 +543,8 @@ function shortLabel(moduleName, hints) {
   //   ① 全名命中 hints（运维显式声明「这个子路径代表某种能力」）→ 用它
   //   ② 才算「父模块已代表」的子路径 → 跳过
   // 这样默认行为不变（大多数子路径仍隐藏，因为没人为它声明），但**可配置可显**。
-  const fullHit = hints[full]
+  // 只认自有属性：`constructor` / `toString` 等原型成员不是能力标签。
+  const fullHit = Object.hasOwn(hints, full) ? hints[full] : undefined
   if (fullHit !== undefined) return fullHit
 
   if (bare.includes('/') && bare !== 'dsh-plugin-manager/tools' && bare !== 'dsh-plugin-market/tools') {
@@ -362,7 +553,7 @@ function shortLabel(moduleName, hints) {
 
   if (HIDDEN_MODULES.has(full)) return null
 
-  const hit = hints[bare]
+  const hit = Object.hasOwn(hints, bare) ? hints[bare] : undefined
   if (hit !== undefined) return hit
 
   // 未识别：保留原名（去掉 dsh- 前缀），加 ? 表明「存在但我没映射过」。
@@ -453,6 +644,27 @@ function compositionToTags(composition, hints) {
 async function renderRoster(registry, selfId, warn, hints, capBytes = ROSTER_HARD_CAP_BYTES) {
   const degraded = []
 
+  /**
+   * ⚠️ 2026-11-07 修（R6，B-4）：`capBytes` 是硬顶，早退路径也不能绕。
+   *
+   * 原来 :474/:480/:490/:495 直接 return 常量串，cap=20 时实测返回 63 B / 31 B。
+   * 这里抽出本函数内的统一收口：正常 cap 下字节不变（直接返回原串），
+   * 只有超顶时才按 code point 截断并加同一个 ` …` 后缀。
+   */
+  // ⚠️ 2026-11-07 修（R8，#5）：cap=1..4 时旧的 clampToCap 返回空串，调用方却仍回 ok:true，
+  // 模型拿到空内容却被告知成功。现在截不出任何正文时退回一条**能塞进 cap**的最短非空提示
+  // （不改变成功语义，只保证非空）。顺序从长到短，逐条用真实字节数验证。
+  const nonEmptyRosterFallback = () => {
+    for (const hint of ["(roster omitted: rosterMaxBytes too small)", "(omitted)", "…", "..", "."]) {
+      if (bytes(hint) <= capBytes) return hint
+    }
+    return "."
+  }
+  const ensureNonEmpty = (text) => (text === "" ? nonEmptyRosterFallback() : text)
+
+  const clampToCap = (text) =>
+    bytes(text) <= capBytes ? text : ensureNonEmpty(truncateWithSuffix(text, capBytes))
+
   // ── 主数据源：compositionInventory() ──
   // 它给**已经算好 enabled 的行**（平台条件已求值），不需要启动会话。
   let compositions
@@ -461,34 +673,57 @@ async function renderRoster(registry, selfId, warn, hints, capBytes = ROSTER_HAR
       throw new Error("this deployment exposes no compositionInventory()")
     }
     compositions = await registry.compositionInventory()
+    // ⚠️ 2026-11-07 修（R10，#3）：非数组返回值是**读失败形态**，不是「名册为空」。
+    // 原来下面的 `!Array.isArray(compositions) || compositions.length === 0` 把
+    // undefined / null / 非数组对象一并塌成 "The preset roster is empty"，
+    // 于是 compositionInventory→undefined 而 list() 明明有 preset 时，模型看到的是
+    // 「一个模式都没有」、degraded 还记 roster-empty。现在非数组一律按读失败处理，
+    // 交给下面同一个 catch 走 list() 兜底；兜底也失败才报 roster-unavailable。
+    // （R8#1 已在 list() 路径修过同一判据，这里是残留。）
+    if (!Array.isArray(compositions)) {
+      throw new Error(
+        "compositionInventory() returned a non-array value (" +
+          (compositions === null ? "null" : typeof compositions) +
+          "); this is a registry read failure, not an empty roster",
+      )
+    }
   } catch (error) {
     warn("reading the composition inventory failed: " + (error instanceof Error ? error.message : String(error)))
     // 退回 list()：至少还能给出模式名与 broken 状态（但给不出能力）。
     try {
       const fallback = await registry.list()
-      if (!Array.isArray(fallback) || fallback.length === 0) {
-        return { text: "The preset roster is empty, so there is no mode to delegate to.", degraded: ["roster-empty"] }
+      // ⚠️ 2026-11-07 修（R10，#3）：同一判据也要用在 list() 兜底上 —— 非数组 = 又一次
+      // 读失败，抛给下面的 catch 报 roster-unavailable；只有**真空数组**才是「名册为空」。
+      if (!Array.isArray(fallback)) {
+        throw new Error("registry.list() returned a non-array value")
+      }
+      if (fallback.length === 0) {
+        return { text: clampToCap("The preset roster is empty, so there is no mode to delegate to."), degraded: ["roster-empty"] }
       }
       const names = fallback
         .filter((r) => r !== null && typeof r === "object" && typeof r.id === "string" && r.id !== "" && r.id !== selfId)
         .filter((r) => !(typeof r.broken === "string" && r.broken !== ""))
         .map((r) => r.id)
-      if (names.length === 0) return { text: "No usable agent mode was found.", degraded: ["roster-no-usable"] }
+      if (names.length === 0) return { text: clampToCap("No usable agent mode was found."), degraded: ["roster-no-usable"] }
       return {
-        text:
+        text: clampToCap(
           "Installed agent modes (capability detail is unavailable in this deployment):\n  " +
-          names.join(", ") +
-          "\n\nPick by name only if you already know what the mode does; otherwise escalate to `detail: true`.",
+            names.join(", ") +
+            "\n\nPick by name only if you already know what the mode does; otherwise escalate to `detail: true`.",
+        ),
         degraded: ["inventory-unavailable"],
       }
     } catch (listError) {
       warn("falling back to list() also failed: " + (listError instanceof Error ? listError.message : String(listError)))
-      return { text: "The agent-preset roster is unavailable in this deployment, so no mode can be delegated to.", degraded: ["roster-unavailable"] }
+      return { text: clampToCap("The agent-preset roster is unavailable in this deployment, so no mode can be delegated to."), degraded: ["roster-unavailable"] }
     }
   }
 
-  if (!Array.isArray(compositions) || compositions.length === 0) {
-    return { text: "The preset roster is empty, so there is no mode to delegate to.", degraded: ["roster-empty"] }
+  // ⚠️ 2026-11-07 修（R10，#3）：走到这里 `compositions` 一定是数组 —— 非数组已在上面
+  // 按「读失败」处理并走 list() 兜底。只有**真的拿到空数组**才是「名册为空」；
+  // 这条真空数组路径与备份逐字节一致。
+  if (compositions.length === 0) {
+    return { text: clampToCap("The preset roster is empty, so there is no mode to delegate to."), degraded: ["roster-empty"] }
   }
 
   const lines = []
@@ -512,6 +747,11 @@ async function renderRoster(registry, selfId, warn, hints, capBytes = ROSTER_HAR
   lines.push("error means the cap was reached, not that the mode lacks the tool. A leading ? marks an")
   lines.push("unrecognized module that is present but not mapped to a plain word.")
   lines.push("")
+
+  // ⚠️ 2026-11-07 修（R6，B-2）：记下前言/表头的边界。下面「无可运行模式」的
+  // 预算裁剪必须能区分「诊断行」与「前言/表头」—— 只有前者才是
+  // `diagnostic line(s) omitted` 该数的东西，后者被丢时不能谎称丢了诊断。
+  const preambleCount = lines.length
 
   let usable = 0
   // ── 两趟渲染：先算每个模式的能力集，再抽出「所有模式共有」的部分 ──
@@ -626,7 +866,51 @@ async function renderRoster(registry, selfId, warn, hints, capBytes = ROSTER_HAR
   }
 
   if (usable === 0) {
-    return { text: "No usable agent mode was found.", degraded: ["roster-no-usable"] }
+    // ⚠️ 2026-11-07 修（R4）：原来这里只返回一句 "No usable agent mode was found."，把上面
+    // 已经写进 `lines` 的逐模式诊断（尤其 `[CANNOT RUN: …]`）整段丢掉 —— 全部 preset 都
+    // 坏掉时，模型看不到任何原因，只能盲派下一轮。语义不变（仍然是没有可用模式），只是把
+    // 已经算好的原因一起带回去。
+    //
+    // ⚠️ 2026-11-07 修（R5）：结论句原来写 "Every mode above is listed with the reason it
+    // cannot take a delegation." —— 那句话与实现矛盾：诊断会从尾部整行丢弃（并另附省略
+    // 说明），而全部 preset 都等于 selfId 时**一行模式都没有**，它指向空处。现在只做中性
+    // 陈述；「丢了几行」交给单独的省略说明，不再承诺"上面都列了原因"。
+    //
+    // 结论行优先保留（R5 的 [4] 选②）：先给「空行 + 结论」留出字节预算，诊断只在剩余
+    // 预算内按整行保留 —— 极小 cap 下被截掉的是诊断，不是结论。
+    const summary = "No usable agent mode was found."
+    const tail = "\n\n" + summary
+    const budget = capBytes - bytes(tail)
+    // ⚠️ 2026-11-07 修（R6，B-2）：`omitted` 原来无差别数掉**所有**被 pop 的行，
+    // 含前言/表头（`preambleCount` 之前的那几行说明）。全部 preset 都等于 selfId 时
+    // 一行诊断都没有，却仍报「7 diagnostic line(s) omitted」—— 实测复现。
+    // 现在分开 pop、分开计数：文案只报真正丢掉的**诊断**行数。
+    let omittedDiagnostics = 0
+    const note = () => "(" + omittedDiagnostics + " diagnostic line(s) omitted to fit the size cap)"
+    const head = (withNote) => lines.concat(withNote && omittedDiagnostics > 0 ? [note()] : []).join("\n")
+    // ① 先从尾部整行丢**诊断行**（前言/表头一律不动），直到「诊断 + 省略说明」装进剩余预算。
+    while (lines.length > preambleCount && bytes(head(true)) > budget) {
+      lines.pop()
+      omittedDiagnostics += 1
+    }
+    // ② 诊断丢光了仍装不下 → 才丢前言/表头。它们不是诊断，不计入上面的数字，
+    //    所以此时文案不会声称丢了诊断（`omittedDiagnostics === 0` → 无 note）。
+    while (lines.length > 0 && bytes(head(true)) > budget) {
+      lines.pop()
+    }
+    let out
+    if (bytes(head(true)) <= budget) {
+      out = head(true) + tail
+    } else {
+      // ② 连省略说明都装不下（极小 cap）：只保留结论，绝不从尾部切掉它。
+      out = summary
+    }
+    // 兜底硬顶：只有 cap 连结论句本身都装不下时才会走到这里（物理下限，硬顶绝不突破）。
+    // 这不是「优先截断诊断」的那条路径 —— 那条在上面的 while 里已经处理完了。
+    if (bytes(out) > capBytes) out = truncateWithSuffix(out, capBytes)
+    // ⚠️ 2026-11-07 修（R8，#4）：新数组会把 :603 已 push 的 no-enabled-modules:id 与
+    // roster-truncated 全部丢掉。在已有数组上追加，不新建。
+    return { text: ensureNonEmpty(out), degraded: [...degraded, "roster-no-usable"] }
   }
 
   lines.push("")
@@ -772,7 +1056,85 @@ if (bytes(text) > capBytes) {
       }
       // 连 0 个模式都装不下 → 至少保住前缀 + 指引（后面的"砍最长行"会继续压）。
       if (best !== null) text = best
-      else text = head.flat().concat(tailGuidance).join("\n")
+      else {
+        // ⚠️ 2026-11-07 修（R11，BUG-1）：这里原来直接拼 head + tailGuidance，**不带**
+        // 「N 个模式被省略」的说明 —— 模型看到完整前言与升级阶梯、中间一个模式都没有，
+        // 却没有任何字说明模式被省略（实测 10 模式 / cap=1230：输出 1226 B、0 条
+        // "- mode-" 行、"more mode(s) omitted" 为 false，而 degraded 已含
+        // roster-truncated，文案与状态自相矛盾）。
+        //
+        // 为什么不能只做「方案②」（把 keepCount=0 也纳入候选比较）：上面的贪心循环
+        // **已经**试过 keepCount=0 + 说明（这段名册是 1273 B），它在 1230 装不下，
+        // 于是 best 仍是 null —— 只改比较逻辑并不能让说明出现。必须让「省略说明」
+        // 优先于前言：它是「这里有东西被省略」的唯一信号，比任何一行前言都值钱。
+        //
+        // 本分支按 说明 > 尾部指引 > 前言 的优先级腾字节：
+        //   · 先拼「说明 + 尾部指引」，再从**开头按整行**回填前言（装不下就停，
+        //     不切半句）—— 预算利用率最大，且说明一定在场；
+        //   · 说明 + 指引仍超顶 → 从后往前逐行丢尾部指引；
+        //   · 说明本身都放不下（极小 cap）→ 退到更短的同义说明，最后才按 code point
+        //     截断（cap < 4 B 时连 "omit" 都装不下，只剩截断记号 —— 物理下限）。
+        // 所有情形都保证 bytes(text) <= capBytes（硬顶是契约）；正常路径
+        // （best !== null，即不裁剪或 keepCount>0 装得下）逐字节未动。
+        const omitted = modeBlocks.length
+        const notes = [
+          "(" + omitted + " more mode(s) omitted to fit the size cap)",
+          "(" + omitted + " mode(s) omitted)",
+          omitted + " omitted",
+          "omit " + omitted,
+          "omitted",
+          "omit",
+        ]
+        const trimEdges = (rows) => {
+          let start = 0
+          let end = rows.length
+          while (start < end && rows[start].trim() === "") start += 1
+          while (end > start && rows[end - 1].trim() === "") end -= 1
+          return rows.slice(start, end)
+        }
+        const compose = (headRows, note, tailRows) => {
+          const tail = trimEdges(tailRows)
+          return headRows
+            .concat(headRows.length > 0 ? ["", note] : [note], tail.length > 0 ? [""] : [], tail)
+            .join("\n")
+        }
+        let candidate = ""
+        for (const note of notes) {
+          const allHead = trimEdges(head.flat())
+          let tailRows = tailGuidance
+          // ① 先让「说明 + 指引」自己装下（说明绝不先丢）。
+          while (bytes(compose([], note, tailRows)) > capBytes && tailRows.length > 0) {
+            tailRows = tailRows.slice(0, -1)
+          }
+          if (bytes(compose([], note, tailRows)) > capBytes) continue
+          // ② 按整行从开头回填前言，装不下就停（顺序与原文一致，不切半句）。
+          let keptHead = []
+          for (const line of allHead) {
+            const nextHead = keptHead.concat([line])
+            if (bytes(compose(nextHead, note, tailRows)) > capBytes) break
+            keptHead = nextHead
+          }
+          candidate = compose(keptHead, note, tailRows)
+          break
+        }
+        if (candidate === "") {
+          // 连最短的同义说明都装不下（物理下限）：按 code point 截断，硬顶仍绝不突破。
+          candidate = notes[notes.length - 1]
+          const SUFFIX = " …"
+          const suffixBytes = bytes(SUFFIX)
+          const budget = Math.max(0, capBytes - suffixBytes)
+          let used = 0
+          let cut = 0
+          for (const ch of candidate) {
+            const b = bytes(ch)
+            if (used + b > budget) break
+            used += b
+            cut += ch.length
+          }
+          candidate = candidate.slice(0, cut) + (cut > 0 && suffixBytes <= capBytes ? SUFFIX : "")
+        }
+        text = candidate
+      }
     }
 
     // ② 还超就砍最长行。
@@ -852,34 +1214,47 @@ if (bytes(text) > capBytes) {
     //     ②c 仍能保证硬顶不被突破。
     //     变异测试确认：只删 ②c 不变红（②b 足够）；同时删 ②b+②c 变红
     //     （cap=80 时输出 927 B = 突破 11 倍）。
-    if (bytes(text) > capBytes) {
-      // ⚠️ BUG-A（第四轮复核抓到，P2）：**预留字节必须按实际后缀算**。
-      //
-      //   原来写 `capBytes - 2`，但追加的后缀 `" …"` 是 **4 字节**
-      //   （空格 1 + U+2026 省略号 3）。于是 cap ∈ {3..44, 46..47} 时
-      //   输出 `cap + 2` 字节 —— **硬顶被突破**。
-      //
-      //   R-7e 当时抽样的 [80,150,300,...] 恰好全部绕开这个区间，所以测试没抓到。
-      //   现在：后缀字节数用常量算出来，且**后缀本身装不下时就不加后缀**
-      //   （宁可输出空串/纯截断，也不突破硬顶 —— 硬顶是契约）。
-      const SUFFIX = " …"
-      const suffixBytes = bytes(SUFFIX)
-      const budget = Math.max(0, capBytes - suffixBytes)
-      let used = 0
-      let cut = 0
-      for (const ch of text) {
-        const b = bytes(ch)
-        if (used + b > budget) break
-        used += b
-        cut += ch.length
-      }
-      // 只有真的截出了内容、且后缀装得下时才加后缀。
-      const suffix = cut > 0 && suffixBytes <= capBytes ? SUFFIX : ""
-      text = text.slice(0, cut) + suffix
-    }
+    if (bytes(text) > capBytes) text = truncateWithSuffix(text, capBytes)
   }
 
-  return { text, degraded }
+  return { text: ensureNonEmpty(text), degraded }
+}
+
+/**
+ * 可用模式 id 列表：排除非对象行、空 id、自己、以及 broken 行。
+ *
+ * `knownIds()` 与 `presetUnusable()` 原来各写一份逐字相同的 filter+map 链，抽成这一份。
+ *
+ * @param rows - `registry.list()` 的返回值。
+ * @param selfId - 本模式自己的 id（列出自己没有意义）。
+ * @returns `string[]`。
+ */
+function usableIds(rows, selfId) {
+  return rows
+    .filter((row) => row !== null && typeof row === 'object')
+    .filter((row) => typeof row.id === 'string' && row.id !== '' && row.id !== selfId)
+    .filter((row) => !(typeof row.broken === 'string' && row.broken !== ''))
+    .map((row) => row.id)
+}
+
+/**
+ * 把本部署的递归预算写进 `request`（`delegate()` 与 `ask` 共用这一份）。
+ *
+ * 判据（与上游 tool-subagent 同形）：只透传整数且 `>= 0` —— 0 是宿主「禁止再派」的硬顶，
+ * 必须照传（旧 `> 0` 判据会把 0 当无值过滤掉，等于绕过调用方设定的递归硬顶）；
+ * NaN / -1 / Infinity / 非数字不写进 request（宿主的 maxDepth=NaN 会被序列化成 null）；
+ * undefined 不传，保持宿主默认。解析失败同样不带，让服务用默认值。
+ *
+ * @param request - 即将交给 `startActivation` 的请求对象（原地赋值）。
+ * @param subagents - 带 `resolveMaxDepth()` 的服务。
+ */
+function applyMaxDepth(request, subagents) {
+  try {
+    const maxDepth = subagents.resolveMaxDepth?.()
+    if (Number.isInteger(maxDepth) && maxDepth >= 0) request.maxDepth = maxDepth
+  } catch {
+    // 解析不了就不带，让服务用默认值。
+  }
 }
 
 /**
@@ -893,7 +1268,12 @@ export function apply(ctx, config) {
   if (config?.enabled === false) return
 
   const warn = warnOnceFactory(ctx)
-  const selfId = typeof config?.selfPresetId === 'string' && config.selfPresetId !== '' ? config.selfPresetId : 'blackpigmodel'
+  // ⚠️ 2026-11-07 修（R10，#5）：只判空串不 trim，配置写成 ' blackpigmodel ' 时 selfId 与
+  // 名册里的 id 不相等 —— 名册把自己列出来、knownIds 不排除自己、presetUnusable 的
+  // self-preset 闸也失效。guard-v10 的 normalizePresetId() 是 trim 后判空的，
+  // 这里改成同一口径；正常无空格配置的取值逐字节不变。
+  const configuredSelfId = typeof config?.selfPresetId === 'string' ? config.selfPresetId.trim() : ''
+  const selfId = configuredSelfId !== '' ? configuredSelfId : 'blackpigmodel'
 
   /**
    * 名册字节硬顶：`config.rosterMaxBytes` 优先，缺省 4000。
@@ -977,7 +1357,13 @@ export function apply(ctx, config) {
       childSessionId: null,
       // 只声明**真的验证过什么**。没回读子会话事件，就不要用 mounted / presetEventSeen
       // 这种"看起来验过"的字段 —— 它们恒为初始值，会误导调用方。
-      level: 'mount-only',
+      //
+      // 2026-11-07 修（R9，#6）：OUTPUT_SCHEMA 没有为 level 定义枚举，只定义了
+      // mount-only 的含义（preset 被请求**且子会话已启动**）。failure() 的
+      // childSessionId 恒为 null，所以这里不能再用 mount-only 冒充「已挂载」。
+      // 不造 schema 外的枚举值：level: null = 没有层级声明，mounted: false = 明确未挂载。
+      level: null,
+      mounted: false,
     },
     ...options.degraded === undefined ? {} : { degraded: options.degraded },
   })
@@ -994,11 +1380,16 @@ export function apply(ctx, config) {
 
     // ★ 必填：把「忘传」从静默降级变成可见失败。
     if (presetId === '') {
-      const ids = await knownIds()
+      const known = await knownIds()
       return failure('preset-required', 'A `preset` id is required. Call with `list: true` to see the available ids.', {
         stop: true,
-        nextAction: ids.length === 0 ? 'no mode is available; report to the user' : `choose one of: ${ids.join(', ')}`,
-        degraded: ids.length === 0 ? ['no-usable-mode'] : undefined,
+        // 2026-11-07 修（R9，#5）：读失败必须与「真空名册」给出不同回执。
+        nextAction: known.ok
+          ? (known.ids.length === 0 ? 'no mode is available; report to the user' : `choose one of: ${known.ids.join(', ')}`)
+          : `the agent-preset registry could not be read (${known.error}); this is a registry read failure, NOT "no mode is available" — report it to the user`,
+        degraded: known.ok
+          ? (known.ids.length === 0 ? ['no-usable-mode'] : undefined)
+          : ['registry-unreadable'],
       })
     }
 
@@ -1077,31 +1468,25 @@ export function apply(ctx, config) {
       parent,
       agentPreset: presetId,
     }
-    try {
-      // ⚠️ 2026-11-02 通用化：**不传数字**（旧代码硬编码 1）。
-      //
-      // `resolveMaxDepth(configured)` 的语义：
-      //   · 传数字 → 用它（本模块替调用方定深度，等于绕过面板）
-      //   · **不传（undefined）** → 返回 `config.maxDepth.get()`，也就是**设置面板里的值**
-      //   · `'provider-managed'` → undefined（让进程外 provider 自己管）
-      //
-      // 旧代码传 1，于是即使面板把 maxDepth 调到 2/3，本工具派出的代理仍只有 1 层预算，
-      // 队友拿到的是「不能再往下派」的名册路径。现在跟随面板。
-      const maxDepth = subagents.resolveMaxDepth?.()
-      if (maxDepth !== undefined) request.maxDepth = maxDepth
-    } catch {
-      // 解析不了就不带，让服务用默认值。
-    }
+    applyMaxDepth(request, subagents)
 
     try {
       const activation = await subagents.startActivation({
         provider: 'spawn',
-        label: typeof args?.description === 'string' && args.description !== '' ? args.description : `delegate to ${presetId}`,
+        // ⚠️ 2026-11-07 修（R16b，BUG-C）：原来只判空串、不 trim，`description: "   "` 会把
+        // 一串空白当成 label（名册/回执里出现一个看不见的标签）。同文件 :1375/:1394/:1800 与
+        // file-info 的 parsePaths 都是 trim 后判空的口径，这里对齐：空白走默认 label。
+        // 非空 description 仍**原样**返回（不 trim —— 标签里的空格是调用方内容）。
+        label:
+          typeof args?.description === 'string' && args.description.trim() !== '' ? args.description : `delegate to ${presetId}`,
         request,
+        ...request,
         signal: exec?.signal,
         delivery: 'parent',
       })
-      const childSessionId = typeof activation?.childId === 'string' ? activation.childId : null
+      // 2026-11-07 修（R9，#3）：空串不是 child id。只采信非空字符串，
+      // 否则走已有的 no-child-id 失败分支，不能回 ok:true 带一个空 id。
+      const childSessionId = typeof activation?.childId === 'string' && activation.childId !== '' ? activation.childId : null
       if (childSessionId === null) {
         return failure('no-child-id', `Dispatching to "${presetId}" returned no subagent id.`, { stop: false, presetId })
       }
@@ -1112,8 +1497,8 @@ export function apply(ctx, config) {
         message:
           `Started a "${presetId}" worker: ${childSessionId}. ` +
           'Record that id now (into `todo_write`): it is the only handle `send_to_subagent` accepts. ' +
-          'This worker is NOT a Team member: `wait_agent` and `list_agents` do not see it and will ' +
-          'report "no-active-peer" forever, so do not wait on it. Tell the user what you dispatched, ' +
+          'This worker is NOT a Team member: `list_agents` never sees it and `wait_agent` returns noProgress ' +
+          'immediately for it, so never wait on it. Tell the user what you dispatched, ' +
           'then either end your turn (its completion notice will wake you) or do independent work ' +
           'that touches different files.',
         evidence: {
@@ -1130,26 +1515,42 @@ export function apply(ctx, config) {
     }
   }
 
-  /** 读名册，失败返回空数组（不抛）。 */
+  /**
+   * 读名册。成功返回 { ok: true, rows }；失败返回 { ok: false, rows: [], error }（不抛）。
+   *
+   * ⚠️ 2026-11-07 修（R8，#1）：原来失败直接 `return []`，把「注册表读取失败」伪装成
+   * 「一个预设都没有」—— 调用方随后把一个真实存在的 preset 报成 `unknown-preset`，且 0 条 warn。
+   * 现在失败必须带回原因，让调用方能区分「列表为空」与「列表读取失败」。
+   */
   const safeList = async (registry) => {
     try {
       const rows = await registry.list()
-      return Array.isArray(rows) ? rows : []
-    } catch {
-      return []
+      if (!Array.isArray(rows)) {
+        return { ok: false, rows: [], error: 'registry.list() returned a non-array value' }
+      }
+      return { ok: true, rows, error: null }
+    } catch (error) {
+      return { ok: false, rows: [], error: error instanceof Error ? error.message : String(error) }
     }
   }
 
   /** 当前可派活的 id 列表（排除自己、排除 broken；2026-11-02 起不再有任何名单过滤）。 */
   const knownIds = async () => {
     const registry = serviceOf('agentPresets')
-    if (registry === undefined) return []
-    const rows = await safeList(registry)
-    return rows
-      .filter((row) => row !== null && typeof row === 'object')
-      .filter((row) => typeof row.id === 'string' && row.id !== '' && row.id !== selfId)
-      .filter((row) => !(typeof row.broken === 'string' && row.broken !== ''))
-      .map((row) => row.id)
+    // 2026-11-07 修（R9，#5）：返回结构带 ok，不再把「读失败」塌成 []。
+    // 读失败与「真空名册」对调用方必须是两种状态。
+    if (registry === undefined) return { ok: false, ids: [], error: 'the agent-preset registry is unavailable' }
+    const listed = await safeList(registry)
+    if (!listed.ok) {
+      // 读不到 ≠ 不存在：必须响，否则上层会把故障当成「没有可用模式」。
+      warn('reading the agent-preset registry failed: ' + listed.error + ' — this is NOT the same as "no preset exists"')
+      return { ok: false, ids: [], error: listed.error }
+    }
+    return {
+      ok: true,
+      ids: usableIds(listed.rows, selfId),
+      error: null,
+    }
   }
 
   /**
@@ -1179,9 +1580,20 @@ export function apply(ctx, config) {
     if (registry === undefined || typeof registry.list !== 'function') {
       return failure('registry-unavailable', 'The agent-preset registry is unavailable, so no mode can be selected.', { stop: true, presetId })
     }
-    const known = await knownIds()
+    // ⚠️ 2026-11-07 修（R8，#1）：只读一次注册表，并且**先分清**「读失败」与「读到了但没这个 id」。
+    const listed = await safeList(registry)
+    if (!listed.ok) {
+      warn('reading the agent-preset registry failed while checking "' + presetId + '": ' + listed.error + ' — this is NOT the same as "unknown preset"')
+      return failure(
+        'registry-unreadable',
+        `The agent-preset registry could not be read, so "${presetId}" cannot be checked for existence. ` +
+          `This is a registry read failure, not proof that the preset does not exist: ${listed.error}`,
+        { stop: true, presetId },
+      )
+    }
+    const rows = listed.rows
+    const known = usableIds(rows, selfId)
     if (known.includes(presetId)) return undefined
-    const rows = await safeList(registry)
     const brokenRow = rows.find((row) => row?.id === presetId)
     if (brokenRow !== undefined && typeof brokenRow.broken === 'string' && brokenRow.broken !== '') {
       return failure('preset-broken', `"${presetId}" exists but cannot compose a session: ${brokenRow.broken}`, {
@@ -1257,7 +1669,29 @@ export function apply(ctx, config) {
       },
       output: {
         schema: OUTPUT_SCHEMA,
-        render,
+        // ⚠️ 2026-11-07 修（R13b，BUG-A）：把 apply 解析出的 rosterMaxBytes 硬顶传进 render，
+        // 让 degraded 追加也受同一预算约束（模块级 render 的默认值 = ROSTER_HARD_CAP_BYTES）。
+        // ⚠️ 2026-11-07 修（R16b，BUG-A）：原来这里**无条件**传 rosterMaxBytes，于是 `detail: true`
+        // 的成功回执也被按名册预算（默认 4000 B）裁 —— 而 detail 的正文是按 detailMaxBytes（默认
+        // 16 KB）生成的。两个预算量纲混用：33 KB 声明正常生成 16 KB message，render 却砍到
+        // 4000 B，连 readPresetDetail 写在尾部的截断说明都被整段切掉（模型拿到半份 YAML、零提示）。
+        // 现在按**回执来源**取预算：只有 `detail: true` 的**成功**回执用 detailMaxBytes（该分支正文
+        // 本来就是按它生成的，正常无截断时 render 逐字节原样返回）；名册 / ask / delegate 以及
+        // 所有失败回执仍用 rosterMaxBytes，与改前逐字节一致（失败回执由 render 的 ` …` 可见省略
+        // 标记收口，不会裸切）。
+        //
+        // ⚠️ 2026-11-07 修（R17b，BUG-A）：预算判断必须与 execute 的**分支优先级**同源
+        // （list → detail → ask）。原来只看 `renderArgs.detail === true`，于是
+        // `{list:true, detail:true}` 实际走 list 分支（名册按 rosterMaxBytes 生成），
+        // render 却按 detailMaxBytes 交付 —— 实测 rosterMaxBytes=4000 / detailMaxBytes=120 时
+        // 2709 B 名册被砍成 120 B、0 条模式行且 degraded 为空（裸切无提示）。
+        // 现在 list 优先判定：`{list:true, detail:true}` 按 rosterMaxBytes 交付；
+        // 真走 detail 的成功回执仍按 detailMaxBytes；其余分支/失败回执取值与改前完全一致。
+        render: (renderArgs, renderValue) => {
+          const detailBudget = renderArgs?.list !== true && renderArgs?.detail === true && renderValue?.ok === true
+          const cap = detailBudget ? detailMaxBytes : capBytes
+          return render(renderArgs, renderValue, cap)
+        },
       },
       isConcurrencySafe: () => true,
       async execute(args, exec) {
@@ -1285,11 +1719,20 @@ export function apply(ctx, config) {
           // 旧版本这里查过 `allowed`（防止"派活被拒但读声明放行"）和 `denied`
           // （不让模型看到危险模式的声明）。名单机制整体删除后，这两个检查失去依据：
           // 现在任何已安装模式都可选择、可读声明，读声明本就是**选人前的正常动作**。
-          // 保留的只有"必须存在"校验 —— 由 `readPresetDetail` 自己负责（读不到就报错）。
+          // 保留的只有"必须存在"校验 —— 2026-11-07（R12）起由下方共享的 `presetUnusable()`
+          // 在**读文档之前**负责；真存在但无声明才是 `readPresetDetail` 的 `detail-empty`。
           const registry = serviceOf('agentPresets')
           if (registry === undefined) {
             return failure('registry-unavailable', 'The agent-preset registry is unavailable, so no declaration can be read.', { stop: true })
           }
+          // 2026-11-07 修（R12）：`detail` 曾是唯一不查 preset 是否存在的路径 ——
+          // 未知 id 会被 `readDocument` 的 `{content: undefined}` 塌成 `detail-empty`
+          // （"declares no plugins."），与 `delegate` 的 `unknown-preset` 互相矛盾。
+          // 复用 `presetUnusable()`：不存在 / broken / self 在**读文档之前**就给出与
+          // `delegate` 同 reason、同 nextAction 的回执；只有真存在且无声明才落到
+          // `readPresetDetail` 的 `detail-empty`。正常成功路径一字未动。
+          const unusable = await presetUnusable(presetId, 'detail')
+          if (unusable !== undefined) return unusable
           const detail = await readPresetDetail(registry, presetId, detailMaxBytes)
           if (!detail.ok) {
             return failure(detail.reason, detail.message, { stop: false, presetId, nextAction: 'pick another mode from the roster' })
@@ -1359,27 +1802,27 @@ export function apply(ctx, config) {
               : 'List ONLY the tool names you can call directly. No explanation, no prose — one comma-separated line.'
 
           const request = { prompt: [{ type: 'text', text: probe }], parent, agentPreset: presetId }
-          try {
-            const maxDepth = subagents.resolveMaxDepth?.()
-            if (maxDepth !== undefined) request.maxDepth = maxDepth
-          } catch {
-            // 解析不了就不带，让服务用默认值。
-          }
+          applyMaxDepth(request, subagents)
 
           try {
             const activation = await subagents.startActivation({
               provider: 'spawn',
               label: `ask ${presetId} what it can do`,
               request,
+              ...request,
               signal: exec?.signal,
               // ⚠️ `caller` 而不是 `parent`：这是一次**探测**，结果直接返回给调用方，
               // 不要给本次会话塞一条"代理完成了"的唤醒通知 —— 那会打断调用方的回合。
               delivery: 'caller',
             })
             // caller 交付时 result 是 promise，await 拿到代理输出。
-            const raw = await activation?.result?.catch?.(() => undefined)
+            // ⚠️ 2026-11-07 修（R4）：原来在 result 上挂一个只返回 undefined 的 catch，把超时 / provider
+            // 失败吞成 undefined，随后被下面的判空改写成 `ask-empty`「它没有自述」——
+            // 真实错误文本消失，模型被误导去走 detail。现在让 rejection 冒到外层 catch，
+            // 由那里报 `ask-failed` 并带上原始错误；只有真正 resolve 且抽不出文本时才是 `ask-empty`。
+            const raw = await activation?.result
             const text = extractProbeText(raw)
-            const childSessionId = typeof activation?.childId === 'string' ? activation.childId : null
+            const childSessionId = typeof activation?.childId === 'string' && activation.childId !== '' ? activation.childId : null
             if (text === '') {
               return failure(
                 'ask-empty',
@@ -1392,7 +1835,10 @@ export function apply(ctx, config) {
             return {
               ok: true,
               presetId,
-              childSessionId: childSessionId ?? undefined,
+              // ⚠️ 2026-11-07 修（R13b，BUG-B）：原来把空值用 `??` 兜成 undefined，会产生一个**值为 undefined 的
+              // 自有属性**，宿主 snapshotJsonValue 后校验会把它变成 ToolOutputError（成功变假失败）。
+              // 用条件展开：无值时该键根本不出现；有值时与改前逐字节一致。
+              ...(childSessionId === null ? {} : { childSessionId }),
               message:
                 `SELF-REPORT from "${presetId}" (not verified facts — the mode described itself):\n\n${text}\n\n` +
                 'If this still does not settle it, use `detail: true` for the declaration (file facts), ' +

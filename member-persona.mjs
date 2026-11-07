@@ -19,10 +19,10 @@
  *
  * ── 为什么按「是不是子会话」判，而不是按 provider 名 ────────────────────────
  *
- * 大脑模式只有一条委派路径（Agent Teams 的 `spawn_teammate`），它的 provider 是
- * `spawn`；这条路径创建的子会话 header 一定带 `parentSession`/`delegationDepth`。
- * 直接判「是不是子会话」比读 descriptor 的 provider 名更稳：不依赖未文档化的
- * `subagent/descriptor` 事件格式。
+ * 判据不依赖委派路径条数：只看 session header 是否带 origin / delegationDepth / parentSession
+ * （现有 `subagent_preset` 主路径 + `spawn_teammate`，`subagent`/`subagent_fork` 仍在 YAML、
+ * 只是被 extraDeny 从大脑面摘掉）。直接判「是不是子会话」比读 descriptor 的 provider 名更稳：
+ * 不依赖未文档化的 `subagent/descriptor` 事件格式。
  *
  * @module blackpig-member-persona
  */
@@ -36,18 +36,66 @@ const PERSONA_SECTION_NAME = 'deployment:persona-prefix'
 /** 段落排序键（与上游一致；取不到就退到 0）。 */
 const PERSONA_ORDER_KEY = 'DEPLOYMENT_PERSONA_PREFIX'
 
-/** 一个每次进程只警告一次的记录器。 */
+/**
+ * 一个「按作用域」只警告一次的记录器。
+ *
+ * ⚠️ 2026-11-07 修（R13b2，BUG-7）：去重键原来是**整条消息串**，而失败消息里嵌了
+ * 与 agent 无关的 `${resolved.failure}` 与 `${attempt}`（重试计数是**每个 agent 各自**
+ * 的）。于是多个不同 agent 的同一故障被合并成 1 条，「5 次重试」也看不出是不是落在
+ * 同一个 agent 上 —— 日志读不出受害面。
+ *
+ * 现在去重键 = `scopeKey + "\u0000" + message`：
+ *   · `scopeKey` 给定时（agent 相关告警传 agent 标识 + 消息类型），不同 agent 各自一条；
+ *   · `scopeKey` 缺省时（配置类告警，全局只有一份），行为与改前**逐字节一致**。
+ * 同一个 agent 的重复故障仍只记一次，不会刷屏。
+ *
+ * @param ctx - preset scope 的插件上下文。
+ * @returns `(message, scopeKey?) => void`。
+ */
 function warnOnceFactory(ctx) {
   const seen = new Set()
-  return (message) => {
-    if (seen.has(message)) return
-    seen.add(message)
+  return (message, scopeKey) => {
+    const key = scopeKey === undefined || scopeKey === null || scopeKey === "" ? message : `${scopeKey}\u0000${message}`
+    if (seen.has(key)) return
+    seen.add(key)
     try {
       ctx.logger?.warn?.(`blackpig-member-persona: ${message}`)
     } catch {
       // 日志通道不可用不能反过来炸掉会话。
     }
   }
+}
+
+/**
+ * 稳定的「这一个 agent」标识，用作 warnOnce 的去重作用域。
+ *
+ * 优先 `session.id`（同一 agent 在整个生命周期里唯一），取不到再退 `agent.id`，
+ * 都没有才回落到一个**不可能撞上真 id** 的占位串 —— 那种情况下宁可多记一条，
+ * 也不要因为得到 `undefined` 把互不相干的 agent 合并进同一个桶。
+ *
+ * @param agent - 目标 agent。
+ * @returns 非空字符串。
+ */
+function agentScopeKey(agent) {
+  // ⚠️ 2026-11-07 修（R18a2，BUG-1）：两次读取**各自兜错**，不能共用一个 try。
+  // 旧实现把 session.id 与 agent.id 的读取放在同一个 try 里：session.id 是 throwing
+  // getter 时直接跳到 catch，agent.id 根本没被试过，于是 3 个不同 agent 全塌进
+  // "agent:?" 这一个桶，warnOnce 把它们合并成一条 —— 又回到 R13b2 要修的「日志读不出
+  // 受害面」。现在 session.id 抛错仍继续试 agent.id，两者都失败才用占位串。
+  // 与 subtalk.mjs 的 agentScopeKeyOf 同口径；正常路径（两次读取都不抛）的返回值不变。
+  try {
+    const sessionId = agent?.session?.id
+    if (typeof sessionId === "string" && sessionId !== "") return `session:${sessionId}`
+  } catch {
+    // 读 session.id 抛错：继续试 agent.id。
+  }
+  try {
+    const agentId = agent?.id
+    if (typeof agentId === "string" && agentId !== "") return `agent:${agentId}`
+  } catch {
+    // 连 agent.id 都读不出：只能退到占位串。
+  }
+  return "agent:?"
 }
 
 /**
@@ -75,8 +123,15 @@ export function apply(ctx, config) {
   if (config?.enabled === false) return
 
   /** 本模块负责的 preset id。覆盖时用它判断"这个子会话是不是继承自我的"。 */
+  // ⚠️ 2026-11-07 修（R10，#2）：外部传入的 presetId 先 trim 再判空。
+  // 旧实现只排除空串，`' blackpigmodel '` 会原样参与归属比较；归属 id 已 trim，
+  // 于是两者永不相等 → 人格静默不覆盖。现在与 ownerPresetIdOf / guard 的 normalizer 同口径。
+  const rawPresetId = typeof config?.presetId === 'string' ? config.presetId : undefined
+  const trimmedPresetId = rawPresetId === undefined ? undefined : rawPresetId.trim()
   const selfPresetId =
-    typeof config?.presetId === 'string' && config.presetId !== '' ? config.presetId : 'blackpigmodel'
+    trimmedPresetId !== undefined && trimmedPresetId !== '' ? trimmedPresetId : 'blackpigmodel'
+  const presetIdWasTrimmed =
+    trimmedPresetId !== undefined && trimmedPresetId !== '' && trimmedPresetId !== rawPresetId
 
   /**
    * 读一个子会话**实际所属**的 preset id。
@@ -90,7 +145,10 @@ export function apply(ctx, config) {
    */
   const ownerPresetIdOf = (agent) => {
     const agentCtx = agent?.ctx
-    for (const carrier of [agentCtx, ctx]) {
+    // ⚠️ 2026-11-07 修（R8，#9）：agent.ctx 缺失时**不再**拿本层 ctx 去查活绑定 ——
+    // composedPreset(undefined) 会返回「当前会话」的 preset，从而把别人的子会话误判成本模式。
+    // 没有 agent.ctx 就无法确认归属：跳过活绑定，只认 session header 兜底。
+    for (const carrier of agentCtx === undefined || agentCtx === null ? [] : [agentCtx, ctx]) {
       if (carrier === undefined || carrier === null) continue
       try {
         const registry = carrier?.get?.('agentPresets')
@@ -108,9 +166,26 @@ export function apply(ctx, config) {
 
   const warn = warnOnceFactory(ctx)
 
-  const text = typeof config?.text === 'string' && config.text !== '' ? config.text : undefined
+  if (presetIdWasTrimmed) {
+    warn(
+      `config.presetId had leading/trailing whitespace (${JSON.stringify(rawPresetId)}); ` +
+        `using the trimmed value "${selfPresetId}"`,
+    )
+  }
+
+  // ⚠️ 2026-11-07 修（R10，#1）：空白串不是有效人格。
+  // 只用 trim 判空，**不改变要装进去的原文**（' hi ' 仍然逐字节装 ' hi '）。
+  const rawText = typeof config?.text === 'string' ? config.text : undefined
+  const text = rawText !== undefined && rawText.trim() !== '' ? rawText : undefined
   if (text === undefined) {
-    warn('no persona text was supplied; members keep the coordinator persona (set config.text)')
+    if (rawText !== undefined && rawText !== '') {
+      warn(
+        `config.text is whitespace-only (${JSON.stringify(rawText)}); ignoring it — members keep the ` +
+          'coordinator persona instead of being given a blank one',
+      )
+    } else {
+      warn('no persona text was supplied; members keep the coordinator persona (set config.text)')
+    }
     return
   }
 
@@ -197,6 +272,7 @@ export function apply(ctx, config) {
         'cannot read this delegated child\'s preset ownership (neither the live binding nor the session header ' +
           'yielded a preset id), so its persona is NOT being overwritten and it keeps the coordinator persona ' +
           '— which tells it it cannot write files or run commands; it will look like a worker that refuses to work',
+        `${agentScopeKey(agent)}|unreadable-preset-ownership`,
       )
       return
     }
@@ -207,7 +283,20 @@ export function apply(ctx, config) {
     if (record?.installed === true) return
 
     const attempt = (record?.count ?? 0) + 1
-    if (attempt > MAX_ATTEMPTS) return
+    if (attempt > MAX_ATTEMPTS) {
+      // ⚠️ 2026-11-07 修（R4）：注释（见 MAX_ATTEMPTS）承诺「超过就放弃并**明确记一条日志**」，
+      // 旧实现却在第 6 次起静默 return，最后可见日志停在 "retry 5/5"，读起来像还会再试。
+      // 只在**第一次**越过上限时记一条（`gaveUp` 记账），之后每步 pre-step 直接短路、不再刷屏。
+      if (record?.gaveUp !== true) {
+        attempts.set(agent, { installed: false, count: record?.count ?? MAX_ATTEMPTS, gaveUp: true })
+        warn(
+          `gave up installing the member persona after ${MAX_ATTEMPTS} attempts; this delegated child keeps ` +
+            'the coordinator persona (no further retries will be attempted)',
+          `${agentScopeKey(agent)}|gave-up`,
+        )
+      }
+      return
+    }
 
     const resolved = resolveService(agent)
     if (resolved.service === undefined) {
@@ -215,6 +304,7 @@ export function apply(ctx, config) {
       warn(
         `a member scope exposes no systemPrompt service (${resolved.failure}); it keeps the coordinator persona ` +
           `— retry ${attempt}/${MAX_ATTEMPTS}`,
+        `${agentScopeKey(agent)}|no-systemPrompt-service`,
       )
       return
     }
@@ -224,6 +314,7 @@ export function apply(ctx, config) {
       warn(
         `a member scope's systemPrompt has no section() method; it keeps the coordinator persona ` +
           `— retry ${attempt}/${MAX_ATTEMPTS}`,
+        `${agentScopeKey(agent)}|no-section-method`,
       )
       return
     }
@@ -246,6 +337,7 @@ export function apply(ctx, config) {
       warn(
         `installing a member persona was declined: ${error instanceof Error ? error.message : String(error)} — ` +
           `that member keeps the coordinator persona (retry ${attempt}/${MAX_ATTEMPTS})`,
+        `${agentScopeKey(agent)}|section-declined`,
       )
       return
     }
@@ -260,12 +352,29 @@ export function apply(ctx, config) {
       // 也不能在这里再调 warn()（那个通道同样可能抛），所以只静默吞咽。
     }
     if (attempt > 1) {
-      warn(`the member persona for a delegated child installed on attempt ${attempt}/${MAX_ATTEMPTS} (earlier attempts failed)`)
+      warn(
+        `the member persona for a delegated child installed on attempt ${attempt}/${MAX_ATTEMPTS} (earlier attempts failed)`,
+        `${agentScopeKey(agent)}|installed-after-retry`,
+      )
     }
   }
 
-  ctx.on('agent/created', ({ agent }) => {
-    install(agent)
+  ctx.on('agent/created', (payload) => {
+    // ⚠️ 这是 serial 链：宿主没有 per-listener try/catch，一次抛出会截断后续监听
+    // （subtalk 的 hideFromMember、publishAgentAvailability、goal disarm）并让 announce() reject、
+    // agent 创建回滚。与下面的 agent/pre-step 分支同形：吞在本层、记一条日志、让链继续。
+    // ⚠️ 2026-11-07 修（R8，#8）：参数**不解构** —— 解构发生在 try 之外，
+    // handler(undefined) 会抛 "Cannot destructure property 'agent'"，这段保护根本兜不住。
+    try {
+      const agent = payload?.agent
+      if (agent === undefined || agent === null) return
+      install(agent)
+    } catch (error) {
+      warn(
+        `installing a member persona on agent/created threw: ${error instanceof Error ? error.message : String(error)}`,
+        `${agentScopeKey(payload?.agent)}|agent-created-threw`,
+      )
+    }
   })
 
   // ⚠️ 重试必须挂在**会重复触发**的事件上，而且**必须正确透传 waterfall**。
@@ -291,7 +400,10 @@ export function apply(ctx, config) {
       retryPending(payload)
     } catch (error) {
       // 补装失败绝不能打断 agent 的主循环。
-      warn(`retrying a member persona threw: ${error instanceof Error ? error.message : String(error)}`)
+      warn(
+        `retrying a member persona threw: ${error instanceof Error ? error.message : String(error)}`,
+        `${agentScopeKey(payload?.agent)}|retry-threw`,
+      )
     }
     // 防御：万一这条事件在别处被当作普通 emit 调用（不带 next），也不能抛。
     return typeof next === 'function' ? next() : undefined
@@ -304,9 +416,38 @@ export function apply(ctx, config) {
   try {
     const agents = ctx.get('agents')
     if (agents !== undefined && agents !== null && typeof agents.list === 'function') {
-      for (const agent of agents.list()) install(agent)
+      // ⚠️ 2026-11-07 修（R6，B-6）：原来循环体没有单项 try/catch，一个 agent 抛错
+      // 会冒到外层被静默吞掉 → 它**后面**的 agent 全部漏装、零日志（实测 [bad, good]
+      // → installed=[]、warns=[]）。现在单 agent 失败只 warn 并继续下一个；
+      // 外层 catch 保留作最后兜底（取不到 agents 服务不算致命）。
+      // ⚠️ 2026-11-07 修（R10，#3）：`agents.list()` 的返回值也必须先判数组。
+      // 旧实现直接 for...of，返回 undefined/null/对象时抛 TypeError 被外层静默吞掉
+      // → 全部漏装且零诊断。非数组按空列表处理，并明确 warn 实际类型。
+      const listedAgents = agents.list()
+      if (!Array.isArray(listedAgents)) {
+        warn(
+          `agents.list() returned ${listedAgents === null ? 'null' : typeof listedAgents} instead of an array ` +
+            'during the startup backfill; no existing members are being backfilled',
+        )
+      }
+      for (const agent of Array.isArray(listedAgents) ? listedAgents : []) {
+        try {
+          install(agent)
+        } catch (error) {
+          warn(
+            `installing a member persona during the startup backfill threw for one agent: ` +
+              `${error instanceof Error ? error.message : String(error)} — continuing with the remaining agents`,
+            `${agentScopeKey(agent)}|backfill-threw`,
+          )
+          continue
+        }
+      }
     }
-  } catch {
-    // 取不到不是致命错误。
+  } catch (error) {
+    // 取不到不是致命错误，但**不能静默**：没有日志的失败与成功无法区分。
+    warn(
+      `the startup backfill for member personas could not run: ` +
+        `${error instanceof Error ? error.message : String(error)}`,
+    )
   }
 }

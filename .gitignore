@@ -23,7 +23,9 @@ tmp/
 Thumbs.db
 desktop.ini
 
-# ── 本地备份（check.ps1 / verify.ps1 自己也会在 %TEMP% 下建影子 profile）──
+# ── 本地备份（含脚本/会话产生的快照目录，绝不入库、绝不进包）──
+_backup-*/
+
 *.bak
 *.bak-*
 *.bak*
