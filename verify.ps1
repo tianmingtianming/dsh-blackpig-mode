@@ -102,7 +102,7 @@ function Find-PresetDeclaration {
 # README.md 与 verify.ps1 自身不参与字节校验：它们会随编辑变化，
 # 参与校验只会在每次安装后报假 WARN（见 $skipSizeCheck）。
 $expected = [ordered]@{
-    'cordis.patch.yml'    = 36857
+    'cordis.patch.yml'    = 37395
     'guard-v10.mjs'       = 196819
     'blackpig-roster.mjs' = 102521
     'subtalk.mjs'         = 54964

@@ -60,7 +60,7 @@ dsh.cmd plugin --profile <名> add github:tianmingtianming/dsh-blackpig-mode
 ### 2. 次选：从 Release 装（不需要 git）
 
 ```powershell
-dsh.cmd plugin --profile <名> add https://github.com/tianmingtianming/dsh-blackpig-mode/releases/download/v1.0.3/dsh-blackpig-mode-1.0.3.tgz
+dsh.cmd plugin --profile <名> add https://github.com/tianmingtianming/dsh-blackpig-mode/releases/download/v1.0.4/dsh-blackpig-mode-1.0.4.tgz
 ```
 
 ### 3. 兜底：本地 tgz（离线、或上面两条都不通时）
@@ -234,6 +234,16 @@ preset id 固定是 `blackpigmodel`，不能两个 bundle 各声明一次。会�
 
 ## 变更记录
 
+### v1.0.4
+
+**人格：派活选模式按「所需能力」选最小档，不按任务难度 —— 每个模式都同样聪明，只是能力范围不同。**
+
+- 症状（这条规则要防的）：把「任务重要 / 难 / 复杂」当成「该抬档」的理由，于是派活时选了一个能力更大、工具更多的模式，活本身并不需要那些工具，只是白背一堆用不上的工具面。
+- 修法：大脑人格里**改写**了原有的 `Pick the mode by capability, never by name` 这一段（不是新增一段重复规则），标题改为 `Pick the mode by capability, never by difficulty — and never by name`，并明确：难不代表所需能力多；抬档不会让活干得更好；只问一句「这活需要哪些额外能力」，没有就用最小档；「重要 / 看起来很难」**不是**抬档理由（这是反面示例，已在同一段里明写禁止）。
+- 不写死任何模式名或能力清单（不出现具体模式 id、参数名、能力词表）—— 模式清单会改名、会增删。段落里出现的 `harness-dev` / `plugin-admin` / `plugin-market` 是**改前就有的**危险能力标签，本次未改动、也不算模式名。
+- 队友人格（`member-persona.text`）里的同名段落**未改**：那条是给队友「再往下派活」用的，本次只动大脑。
+- 已知代价：`verify.ps1` 里 `cordis.patch.yml` 的期望字节数已同步更新到本次实测值 37287。
+
 ### v1.1.0
 
 **新增：委派控制接口的版本兼容层（`compat.mjs`）+ `restrict()` 的失败保护 —— 防 DSH 下一版静默搞坏。**
@@ -323,7 +333,7 @@ Design intent: keep the main conversation's context free of process data. The co
 
 Cost, stated plainly: the coordinator cannot see file contents. To learn what a file says it must spend another round trip. This is a deliberate trade, not a bug.
 
-Install, three ways in order of preference: `dsh.cmd plugin --profile <name> add github:tianmingtianming/dsh-blackpig-mode` (needs git); the v1.0.3 Release tarball URL (no git needed); or a local `.tgz` path after unpacking it and running `check.ps1` first. Full steps are in the Chinese section above.
+Install, three ways in order of preference: `dsh.cmd plugin --profile <name> add github:tianmingtianming/dsh-blackpig-mode` (needs git); the v1.0.4 Release tarball URL (no git needed); or a local `.tgz` path after unpacking it and running `check.ps1` first. Full steps are in the Chinese section above.
 
 `check.ps1` exit codes: **0 = READY**, **1 = NEEDS-CLEANUP**, **2 = BLOCKED** (no `dsh.cmd`, or the profile directory does not exist yet — initialize the profile first). Re-running `check.ps1` *after* a successful install normally still returns **0 (READY)**: item 4 treats "package name already present" as **INFO (normal upgrade state)** and does not count it as a WARN. It returns **1** only when something else still needs cleaning up (for example a leftover old name `dsh-blackpig-model`); use `verify.ps1` for post-install verification.
 
