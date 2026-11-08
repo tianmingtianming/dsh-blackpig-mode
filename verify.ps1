@@ -7,6 +7,9 @@
     装完包后运行（通常无需重启）。核对：包是否落盘且文件完整、profile 是否登记了包、
     是否还残留旧 preset 声明、dsh --dump-config 能否正常合成并含 preset-blackpigmodel。
 
+    字节数默认只作参考、不影响退出码（写死字节对下载者没有意义）；维护者本机要严格
+    校验包内文件字节时加 -StrictSizes。
+
     本脚本不写任何 profile 文件，也不修改 cordis.patch.yml / package.json。
     唯一可能的副作用：若 profile 缺 cordis.yml，`dsh --dump-config` 会自动生成一份
     空壳（正常 profile 本来就有），脚本会先提示这一点。
@@ -20,6 +23,10 @@
 .PARAMETER Profile
     目标 profile 名，默认 desktop。路径为 $DSH_HOME\profiles\<名>。
 
+.PARAMETER StrictSizes
+    按内置字节表严格判定（不符计 WARN → 影响 exit code）。默认关闭：字节表只打印作参考。
+    只在「维护者本机源码自检」时使用；普通安装用户不需要它。
+
 .EXAMPLE
     powershell -NoProfile -ExecutionPolicy Bypass -File .\verify.ps1
 
@@ -32,7 +39,12 @@
 #>
 [CmdletBinding()]
 param(
-    [string]$Profile = 'desktop'
+    [string]$Profile = 'desktop',
+
+    # 默认不按字节数判死：写死字节对「从 GitHub 装包的人」毫无意义
+    # （版本一升、换行符一口径变化，期望值必然对不上，却会让人以为自己装坏了）。
+    # 维护者本机自检需要严格判字节时，显式加 -StrictSizes。
+    [switch]$StrictSizes
 )
 
 $ErrorActionPreference = 'Stop'
@@ -96,11 +108,18 @@ function Find-PresetDeclaration {
     return $found
 }
 
-# 内置期望值表（字节，UTF-8 口径）
+# 内置期望值表（字节，UTF-8 口径）—— **参考信息，默认不参与判定**
 #
-# 2026-11-06 实测（包内 12 个文件）。
-# README.md 与 verify.ps1 自身不参与字节校验：它们会随编辑变化，
-# 参与校验只会在每次安装后报假 WARN（见 $skipSizeCheck）。
+# 为什么要降级（2026-11-08）：本脚本随 npm 包发布，下载者拿到的是自己的副本。
+# 写死字节对下载者只有两种结果：要么恰好相同（没提供任何信息），要么不同
+# （于是报 WARN → exit 1，让人误以为装坏了）。而版本一升级、换行符口径一变，
+# 这张表必然过期。所以默认只打印「实际 / 期望 / 差值」供参考，不参与 exit code；
+# 维护者本机要严格校验时加 -StrictSizes。
+#
+# 同理不要改成 SHA256：换行符口径变化或副本落后一个版本，SHA 一样对不上，
+# 脆弱的根因不变，只是换了一种脆弱。
+#
+# 维护者改完源码、重新打包后，应把这里更新为 `npm pack` 产物里的实测值。
 $expected = [ordered]@{
     'cordis.patch.yml'    = 37395
     'guard-v10.mjs'       = 196819
@@ -112,7 +131,7 @@ $expected = [ordered]@{
     'package.json'        = 745
     'README.md'           = 0       # 不参与校验（随文档编辑变化）
     'LICENSE'             = 1073
-    'check.ps1'           = 13564
+    'check.ps1'           = 0       # 在 $skipSizeCheck 里，不参与比对（旧值 13564 早已失效）
     'verify.ps1'          = 0       # 自引用：写死自身字节必然追不上，不参与校验
 }
 
@@ -218,18 +237,22 @@ if (-not (Test-Path -LiteralPath $pkgDir -PathType Container)) {
         [void]$script:verdicts.Add('包文件/目录读取失败，1/5 判定不完整')
     } elseif ($missing -gt 0) {
         Report 'FAIL' '1/5' '包落盘' ("目录存在，但缺 {0} 个文件（共 {1} 个应到）" -f $missing, $expected.Count)
+    } elseif ($sizeBad -gt 0 -and $StrictSizes) {
+        Report 'WARN' '1/5' '包落盘' ("{0} 个文件齐全，{1} 个字节数与期望不符（-StrictSizes 已开；明细见下一行）" -f ($expected.Count - $missing), $sizeBad)
     } elseif ($sizeBad -gt 0) {
-        Report 'WARN' '1/5' '包落盘' ("{0} 个文件齐全，{1} 个字节数与期望不符（可能是版本不同，务必看下一行明细）" -f ($expected.Count - $missing), $sizeBad)
+        Report 'OK' '1/5' '包落盘' ("{0} 个文件齐全（{1} 个字节数与内置参考值不同，属正常——版本/换行符差异；要严格判请加 -StrictSizes）" -f ($expected.Count - $missing), $sizeBad)
     } else {
         Report 'OK' '1/5' '包落盘' (($expected.Count - $missing).ToString() + ' 个文件齐全，字节数与内置期望值全部一致；README.md 不参与字节校验（允许编辑）')
     }
     Write-Output '       文件明细（字节，UTF-8 口径）:'
     Write-Output '       注: 本脚本 (verify.ps1) 与 check.ps1 不参与字节校验（换行符随 git 配置变化，见 .gitattributes 的 *.ps1 eol=lf）'
+    Write-Output ('       注: 字节数为参考信息，默认不影响退出码（加 -StrictSizes 才按字节判）：{0}' -f $(if ($StrictSizes) { '当前已开启严格字节判定' } else { '当前未开启严格字节判定' }))
     foreach ($r in $fileRows) { Write-Output $r }
     if ($extraFiles.Count -gt 0) {
         Write-Output ('       另有 {0} 个非清单文件（不参与校验）: {1}' -f $extraFiles.Count, (($extraFiles | ForEach-Object { $_.Name }) -join ', '))
     }
-    if ($missing -gt 0 -or $sizeBad -gt 0) { [void]$script:verdicts.Add('包文件不完整/版本不符') }
+    if ($missing -gt 0) { [void]$script:verdicts.Add('包文件不完整') }
+    if ($sizeBad -gt 0 -and $StrictSizes) { [void]$script:verdicts.Add('包文件字节数与内置参考值不符（-StrictSizes）') }
 }
 
 # ── 2. profile package.json 登记 ──

@@ -77,7 +77,7 @@ dsh.cmd plugin --profile <名> add <tgz的完整路径>
 
 ### 装完怎么核对
 
-无论走哪条路，装完后 `check.ps1` / `verify.ps1` 都会落在 `node_modules\dsh-blackpig-mode\` 里，可以直接从那里跑：
+无论走哪条路，装完后 `check.ps1` / `verify.ps1` 都会落在 `node_modules\dsh-blackpig-mode\` 里，可以直接从那里跑（**普通用户不要加 `-StrictSizes`**：那个开关是维护者本机自检用的，会让文件字节的细微差异变成告警）：
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File "<profile目录>\node_modules\dsh-blackpig-mode\verify.ps1" -Profile <名>
@@ -108,7 +108,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\verify.ps1 -Profile <你�
 它按编号做 **5 条核对（`0/5`–`4/5`）**，最后打印结论文本（**没有 `5/5`**，结论行不编号）：
 
 0. `0/5`：`dsh` 可执行文件（`dsh.cmd`）是否存在
-1. 包是否落盘到 `profiles\<名>\node_modules\dsh-blackpig-mode`，以及核对包内文件字节：12 个条目里 **9 个参与字节校验**，`README.md` / `check.ps1` / `verify.ps1` 三个显示 `[SKIP]` 不参与（原因见本节末尾）
+1. 包是否落盘到 `profiles\<名>\node_modules\dsh-blackpig-mode`（**缺件判 FAIL**），并打印包内文件字节：**字节数默认只作参考、不影响退出码**；加 `-StrictSizes` 才按字节判 WARN。`README.md` / `check.ps1` / `verify.ps1` 三个显示 `[SKIP]`，永远不参与（原因见本节末尾）
 2. `profiles\<名>\package.json` 的 `dependencies` **或** `optionalDependencies`（二者任一即可）与 `dsh.profile.bundles` 是否都登记了本包
 3. `cordis.patch.yml` 里是否还残留旧的 `blackpigmodel` 声明
 4. `dsh --profile <名> --dump-config` 的退出码是否为 0，输出里 `preset-blackpigmodel` 命中次数以 **1 + 3/5 已报的残留条数** 为上限：超出上限判 FAIL，落在 1 与上限之间只记 WARN（同一根因不二次判死）
@@ -116,7 +116,11 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\verify.ps1 -Profile <你�
 
 关于第 4 项：`desktop` 这个 profile 由 Electron 独占，`dsh` CLI 会硬拒绝 `--dump-config`。此时 `verify.ps1` 会自动在 `%TEMP%` 下建一个影子 profile（复制 `package.json` 与 `cordis.patch.yml`，`node_modules` 用目录联接只读指回真 profile）来复核，跑完立即删除。真 profile 的 `node_modules` 不被写入。
 
-**为什么第 1 项里有三个 `[SKIP]`。** `README.md` 随文档更新，改一次字节就变，参与校验没有意义。`check.ps1` / `verify.ps1` 也会随编辑变化——写死自身字节的期望值，等于每改一次脚本就要改两处，还容易忘。**当前 `.gitattributes` 是 `*.ps1 text eol=lf`**，这条规则管的是「入库与 `npm pack` 打包的换行符口径是 LF」；它**不保证**包内文件与源码字节数一致，更不保证与已安装副本一致——已安装副本是上次打包留下的，可能落后于当前源码（见重打包待办）。所以这里不做「字节数 / SHA256 完全一致」的断言。注意改用 SHA256 也救不了：只要换行符口径一变、或副本落后一个版本，SHA 同样对不上。所以真正参与字节比对的只有 9 个文件，**脚本尺寸一律以 `verify.ps1` 内置期望值表为准，本文不抄具体数字**。
+**为什么字节数默认不参与判定，以及为什么有三个 `[SKIP]`。** 字节表是**维护者本机的自检工具**：它锁的是「这份源码打出来的包长什么样」。对**从 GitHub 装包的人**来说，写死字节只有两种结果——恰好相同（没有任何信息量），或者不同（于是被判 WARN、退出码变 1，让人误以为装坏了）。版本一升级、换行符口径一变，这张表必然过期。所以默认只把实际/期望/差值打印出来供参考，**不影响退出码**；维护者本机要严格校验时加 `-StrictSizes`。
+
+`README.md` / `check.ps1` / `verify.ps1` 三个永远 `[SKIP]`：它们随文档与脚本编辑而变，写死自身字节等于每改一次就要改两处，还必然忘。
+
+也**不要**把这里换成 SHA256：换行符口径变化、或副本落后一个版本，SHA 一样对不上——脆弱的根因没变，只是从一种脆弱换成另一种。
 
 **`check.ps1` 是安装前脚本；装完之后再跑它通常仍返回 0（READY）。** 它第 4 项专门查 `package.json` 里有没有黑猪包名，装好之后会把「已含包名」判为 **INFO（正常升级态）**，不计入 WARN；**只有另有需要清理的项（例如旧名 `dsh-blackpig-model` 残留）才会返回 1（NEEDS-CLEANUP）**。这是设计如此，不是装坏了、也不是要你去清理。装后验证请用 `verify.ps1`。
 
@@ -194,12 +198,12 @@ preset id 固定是 `blackpigmodel`，不能两个 bundle 各声明一次。会�
 | `package.json` | `dsh.bundle.patch` 声明 + `"exports": { "./*": "./*" }` 子路径映射 |
 | `README.md` | 本文件（不参与字节校验） |
 | `check.ps1` | **装前**只读检查（**6 项编号检查**；`-DryRun` 才额外打印装包影响范围，**不编号**，`Report` 编号最大只到 `6/7`，默认不跑），发现同名声明时报行号并 exit 1。装完之后再跑它通常仍返回 0（READY）：「已含包名」判为 INFO（正常升级态），只有另有需清理项（如旧名 `dsh-blackpig-model` 残留）才返回 1（不参与字节校验） |
-| `verify.ps1` | **装后**生效验证（编号 0/5–4/5；无 5/5，结论行不编号），核对文件字节、`bundles` 登记、`dump-config` 退出码；**脚本内置的期望字节表就是权威尺寸**，其中 9 个参与比对，`README.md` / `check.ps1` / `verify.ps1` 三个 SKIP（不参与字节校验） |
+| `verify.ps1` | **装后**生效验证（编号 0/5–4/5；无 5/5，结论行不编号）：包落盘（缺件判 FAIL）、`bundles` 登记、`dump-config` 退出码；包内文件字节以**参考信息**打印，**默认不影响退出码**，加 `-StrictSizes` 才按字节判；`README.md` / `check.ps1` / `verify.ps1` 三个恒 SKIP |
 | `LICENSE` | MIT 许可证全文 |
 
-逐文件字节数不写在这张表里：包内的 `verify.ps1` 有一份内置期望值表，才是权威来源，本表抄一份只会过期。要核对就运行 `verify.ps1`，第 1 项会逐个打印实际字节与期望字节的差值。
+逐文件字节数不写在这张表里：包内的 `verify.ps1` 有一份内置参考值表，本表抄一份只会过期。要核对就运行 `verify.ps1`，第 1 项会逐个打印实际字节与参考值的差值——**它只是参考，不会让退出码变红**（要严格判就加 `-StrictSizes`）。
 
-三个 `[SKIP]` 的理由：`README.md` 随文档改动而变；`check.ps1` / `verify.ps1` 本身会随编辑变化（当前 `.gitattributes` 为 `*.ps1 text eol=lf`，入库与打包的换行符口径都是 LF，不会因换行符变形；但已安装副本可能落后于源码，版本不同也不是字节比对能兜住的），但仍不参与字节校验，避免改脚本时忘了同步期望值。
+三个 `[SKIP]` 的理由：`README.md` 随文档改动而变；`check.ps1` / `verify.ps1` 本身会随编辑变化（当前 `.gitattributes` 为 `*.ps1 text eol=lf`，入库与打包的换行符口径都是 LF，不会因换行符变形；但已安装副本可能落后于源码，版本不同也不是字节比对能兜住的）。它们的字节数即使写对也很快过期，所以干脆不参与。
 
 两点容易踩：
 
@@ -242,7 +246,12 @@ preset id 固定是 `blackpigmodel`，不能两个 bundle 各声明一次。会�
 - 修法：大脑人格里**改写**了原有的 `Pick the mode by capability, never by name` 这一段（不是新增一段重复规则），标题改为 `Pick the mode by capability, never by difficulty — and never by name`，并明确：难不代表所需能力多；抬档不会让活干得更好；只问一句「这活需要哪些额外能力」，没有就用最小档；「重要 / 看起来很难」**不是**抬档理由（这是反面示例，已在同一段里明写禁止）。
 - 不写死任何模式名或能力清单（不出现具体模式 id、参数名、能力词表）—— 模式清单会改名、会增删。段落里出现的 `harness-dev` / `plugin-admin` / `plugin-market` 是**改前就有的**危险能力标签，本次未改动、也不算模式名。
 - 队友人格（`member-persona.text`）里的同名段落**未改**：那条是给队友「再往下派活」用的，本次只动大脑。
-- 已知代价：`verify.ps1` 里 `cordis.patch.yml` 的期望字节数已同步更新到本次实测值 37287。
+- 已知代价：`verify.ps1` 里 `cordis.patch.yml` 的期望字节数随本次重新打包同步更新（**具体数字见脚本内置表，本文不再抄写——抄一次就会过期**）。
+- **同版另修（面向所有 GitHub 下载者的通用性）**：
+  - 清掉仓库文档里写死的**本机绝对路径与用户名**（源码目录、CLI 安装位置原本写成了某台机器上的完整路径），改用相对路径与 `%LOCALAPPDATA%` 这类环境变量——**换一台机器照样成立**。
+  - `COLD-START-HANDOFF.md` 顶部加读者定位说明：它被本文件公开指向，但它是**维护者交接手册**，只想安装的读者看完 README 即可。
+  - `verify.ps1` 的内置字节表**降级为参考信息，默认不再影响退出码**（新增 `-StrictSizes` 供维护者严格自检）。理由见上文「为什么字节数默认不参与判定」。
+  - 修掉一处过期安装指引（原文指向旧 tag `v1.0.3`），统一指向 `v1.0.4` 的 Release 资产。
 
 ### v1.1.0
 
