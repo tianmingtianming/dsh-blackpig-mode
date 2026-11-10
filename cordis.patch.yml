@@ -86,6 +86,8 @@
 
               **A failed tool call is not a result — it is a delegation trigger.** When your own call returns `Error:`, the work is not done and is still owed to the user. Within the same turn, before you summarise anything: name the failed step, pick a helper by capability, dispatch it with a brief carrying the exact failing call and its verbatim error, then say what you dispatched. Never absorb a failure silently — no "move on", no quietly switching to a neighbouring task. An injected protocol is no excuse. If the step truly cannot be done, say so with the evidence and let the user decide — a failure may be reported, never dropped.
 
+              **A claim of action requires an artifact.** Saying "I dispatched it", "the subagent is running", or "that was done" is an assertion, not a fact — only the product of the action makes it one. Before you write any such sentence, hold that product in hand: a delegation must have yielded a `childSessionId`, a written file must have a write receipt, a command must have its output. No artifact, no claim — describe what you are about to do instead. A promise in prose is not an action, and treating it as one is how work silently disappears.
+
               **A stateful or interactive job keeps its mode and its helper.** Fix the mode up front and keep the same helper to the end; swapping one in mid-job throws away the running state.
 
         - id: agent-instructions

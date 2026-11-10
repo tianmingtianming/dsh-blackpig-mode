@@ -60,7 +60,7 @@ dsh.cmd plugin --profile <名> add github:tianmingtianming/dsh-blackpig-mode
 ### 2. 次选：从 Release 装（不需要 git）
 
 ```powershell
-dsh.cmd plugin --profile <名> add https://github.com/tianmingtianming/dsh-blackpig-mode/releases/download/v1.0.4/dsh-blackpig-mode-1.0.4.tgz
+dsh.cmd plugin --profile <名> add https://github.com/tianmingtianming/dsh-blackpig-mode/releases/download/v1.0.5/dsh-blackpig-mode-1.0.5.tgz
 ```
 
 ### 3. 兜底：本地 tgz（离线、或上面两条都不通时）
@@ -238,6 +238,15 @@ preset id 固定是 `blackpigmodel`，不能两个 bundle 各声明一次。会�
 
 ## 变更记录
 
+### v1.0.5
+
+**人格：新增一条 —— 「声称做过某事」必须手上有可核对产物，否则不许这么写。**
+
+- 症状（这条规则要防的）：协调者（大脑）在回复里写「已派人去查了」，但实际上**从未发起任何调用**——只是把承诺当成事实写进了回复，用户追问三次才暴露。根因是拿「自我印象」当判据（觉得自己派了），这是**自证式判据**，必然静默失效；而且当时并没有任何失败的调用，所以「工具失败 = 改派」那条**管不到**它。
+- 修法：人格里**新增**一段 `**A claim of action requires an artifact.**`，紧跟在 `**A failed tool call is not a result — it is a delegation trigger.**` 之后（同一主题：不许把非事实当结果）。规则不写「要记得验证」（那还是自证判据），而是**报某状态就必须拿出该动作的产物**：派活必须拿到 `childSessionId`、写文件必须有写入回执、跑命令必须有输出；拿不出产物就不要写那句话，改成描述「我接下来要做什么」。原文末句：*A promise in prose is not an action, and treating it as one is how work silently disappears.*
+- 未改动的部分：只加这一段，人格其余各段与队友人格（`member-persona.text`）一字未改。
+- 已知代价：人格正文（`persona.prefix`）+558 B 字符口径（7,695 → 8,253 B，同一量法）；`cordis.patch.yml` 37,395 → **37,953 B**（`verify.ps1` 内置期望表已同步）；打出的 tgz 203,498 B。
+
 ### v1.0.4
 
 **人格：派活选模式按「所需能力」选最小档，不按任务难度 —— 每个模式都同样聪明，只是能力范围不同。**
@@ -344,7 +353,7 @@ Design intent: keep the main conversation's context free of process data. The co
 
 Cost, stated plainly: the coordinator cannot see file contents. To learn what a file says it must spend another round trip. This is a deliberate trade, not a bug.
 
-Install, three ways in order of preference: `dsh.cmd plugin --profile <name> add github:tianmingtianming/dsh-blackpig-mode` (needs git); the v1.0.4 Release tarball URL (no git needed); or a local `.tgz` path after unpacking it and running `check.ps1` first. Full steps are in the Chinese section above.
+Install, three ways in order of preference: `dsh.cmd plugin --profile <name> add github:tianmingtianming/dsh-blackpig-mode` (needs git); the v1.0.5 Release tarball URL (no git needed); or a local `.tgz` path after unpacking it and running `check.ps1` first. Full steps are in the Chinese section above.
 
 `check.ps1` exit codes: **0 = READY**, **1 = NEEDS-CLEANUP**, **2 = BLOCKED** (no `dsh.cmd`, or the profile directory does not exist yet — initialize the profile first). Re-running `check.ps1` *after* a successful install normally still returns **0 (READY)**: item 4 treats "package name already present" as **INFO (normal upgrade state)** and does not count it as a WARN. It returns **1** only when something else still needs cleaning up (for example a leftover old name `dsh-blackpig-model`); use `verify.ps1` for post-install verification.
 
