@@ -39,7 +39,7 @@
 | 规划者无读取工具 | `guard-v10.mjs` 在大脑自己的 agent scope 上装 `tools.restrict()` + `tools.guard()`，`DEFAULT_KEEP` 共 **27** 个名字，其中 `subagent` / `subagent_fork` 被 `extraDeny` 一票否决（它们留在默认表里只是「撤销 extraDeny 即可恢复」的配置回滚位，**不参与可用计数**），经 `extraDeny` 后**实际可用 25 个**，分七类：核实 2 个（`file_info`（类型/存在性/字节数）、`read_image`）；派活 3 个（`subagent_preset`、`send_to_subagent`、`stop_subagent`）；团队协作 9 个（`spawn_teammate`、`send_message`、`list_agents`、`interrupt_agent`、`wait_agent`、`team_task_create` / `list` / `get` / `update`）；后台任务 3 个（`job_list` / `job_output` / `job_kill`）；长期目标 3 个（`create_goal` / `get_goal` / `update_goal`）；交互与自我管理 4 个（`todo_write`、`present`、`ask_user_question`、`working_directory`）；计划模式条件注册 1 个（`exit_plan_mode`）；**2+3+9+3+3+4+1 = 25** | 强制出信息压缩边界：过程数据进不了主对话 |
 | brief 必须自包含 | 队友看不到主对话，只看得到 brief。人格与工具描述都要求「点名文件路径、行号、具体改什么」，禁止「按你刚才的发现去修」 | 派活必须先把信息压成一份可执行的说明书 |
 | 验证必须独立 | 主对话只剩 `file_info` 和 `read_image`，能证明「文件存在 / 多大 / 是否为空」，证明不了「里面写了什么」。要问内容，只能再派一个人去看 | 自己验自己会互相印证错误；独立验证要求换人 |
-| 汇报必须带证据 | `member-persona.mjs` 强制队友报告四段：结论 / 依据（路径+行号、命令+输出、SHA256 或计数）/ 范围与限制 / 不确定。缺依据的结论，主对话不得转述为事实 | 防止把推测升级成事实汇报给用户 |
+| 汇报必须带证据 | 大脑在派活的 brief 里要求回报四段：结论 / 依据（路径+行号、命令+输出、SHA256 或计数）/ 范围与限制 / 不确定。缺依据的结论，主对话不得转述为事实 | 防止把推测升级成事实汇报给用户 |
 
 派活只有一个入口：`subagent_preset`（由 `blackpig-roster.mjs` 注册），`preset` 参数必填，无默认值。`subagent` / `subagent_fork` 在主对话上被 `extraDeny` 摘掉——因为前者会固定回落到 `agentPreset: "standard"`，后者压根不支持选模式，两条旧路径都会让活派错人且**不报错**。
 
@@ -194,7 +194,7 @@ preset id 固定是 `blackpigmodel`，不能两个 bundle 各声明一次。会�
 | `blackpig-roster.mjs` | `subagent_preset` 工具 + 代理名册：列出每个模式的能力标签，支持 `list` / `ask` / `detail` 三种查询 |
 | `subtalk.mjs` | `send_to_subagent` / `stop_subagent`：与已派出的代理继续对话或叫停，冷恢复它自己的上下文 |
 | `file-info.mjs` | `file_info`：只 stat 不读内容，给类型 / 存在性 / 字节数，一次调用可覆盖一组路径 |
-| `member-persona.mjs` | 子会话人格覆盖：把「你不能动手」换回干活的人格，按 agent scope 注册、只覆盖继承本 preset 的子会话 |
+| ~~`member-persona.mjs`~~ | **已于 v1.0.6 删除（2026-11-12）**：rc.2 下它无任何触发路径（唯一能让子会话继承黑猪 preset 的 `subagent_fork` 已被 `extraDeny` 摘掉；`subagent_preset` 派出的子代理归属别的 preset，被 L279 主动放过）。四段报告格式改由大脑在 brief 里要求 |
 | `package.json` | `dsh.bundle.patch` 声明 + `"exports": { "./*": "./*" }` 子路径映射 |
 | `README.md` | 本文件（不参与字节校验） |
 | `check.ps1` | **装前**只读检查（**6 项编号检查**；`-DryRun` 才额外打印装包影响范围，**不编号**，`Report` 编号最大只到 `6/7`，默认不跑），发现同名声明时报行号并 exit 1。装完之后再跑它通常仍返回 0（READY）：「已含包名」判为 INFO（正常升级态），只有另有需清理项（如旧名 `dsh-blackpig-model` 残留）才返回 1（不参与字节校验） |
@@ -240,7 +240,12 @@ preset id 固定是 `blackpigmodel`，不能两个 bundle 各声明一次。会�
 
 ### v1.0.6
 
-**适配 DSH 0.2.2-rc.2：恢复升级后丢失的 4 个委派控制工具；人格去死文本、修参数名。**
+**适配 DSH 0.2.2-rc.2：恢复升级后丢失的 4 个委派控制工具；删除 member-persona；人格去死文本、修参数名。**
+
+> ⚠️ **本次原地覆盖了 v1.0.6 的发布资产**（未发 1.0.7）。原因是本版在首版 v1.0.6 发布后
+> 又发现人格里有**三处错误**（见下「人格修正」），而控制工具挂载才是这一版的主线，
+> 两者属于同一次适配。若你手上是 2026-11-12 20:2x 之前下载的 1.0.6，请重新下载：
+> 旧包的 `send_message` / `interrupt_agent` 参数说明是错的。
 
 - **症状（为什么必须发这个版本）**：DSH 从 0.2.2-rc.1 升到 rc.2 后，黑猪大脑的工具面从 **24 个掉到 15 个**——`send_message`、`list_agents`、`wait_agent`、`interrupt_agent` 四个工具**消失**。
 - **根因（不是本包挂错，是宿主改了分发方式）**：
@@ -248,15 +253,20 @@ preset id 固定是 `blackpigmodel`，不能两个 bundle 各声明一次。会�
   - rc.2 用 `RETIRED_BUNDLES` 退役该 bundle，把工具**拆成两个插件**：`dsh-tool-agent-team` → `team_task_*`（仍由 base 全局挂、受会话级 Team 开关控制）；`dsh-tool-subagent-control` → `send_message` / `list_agents` / `wait_agent` / `interrupt_agent`（**改为各 preset 自己声明**）。
   - `standard.patch.yml` 声明了 `tool-subagent-control`（所以 standard 一直有这 4 个工具），**黑猪 preset 从没声明过** → rc.2 起这 4 个工具无提供者。
 - **修法**：黑猪 preset 的 `plugins` 里补挂 `@deepseek-ai/dsh-tool-subagent-control`（`interrupt: true`）。该行不含任何第三方/项目私有引用，`inject` 只有 `tools/subagents/agents/systemPrompt` 四个通用服务，**不违反「不写死第三方工具名」红线**。
-- **人格清理（去死文本 + 修错）**：
+- **人格修正（本次覆盖发布的真正原因）**：首版 v1.0.6 发布后又查出三处**事实性错误**，全部按实测改掉：
+  - 🔴 **参数名**：原文说「`send_to_subagent` / `stop_subagent` / `send_message` 三者参数相同」。**实测不是** —— `send_message` 与 `interrupt_agent`（宿主 `tool-subagent-control` 提供）的 schema **只有 `agent`（名字）**，传裸 id 会因缺必填字段而失败；只有本包自己的 `send_to_subagent` / `stop_subagent` 经 `compat.mjs` 的 `applyToTools()` 才同时收 `agent_id` 与 `agent`。
+  - 🔴 **`wait_agent` 语义**：原文把它写成“等收件箱输入”。官方描述是「Wait for input at **your next step**」——它报告的是“你自己的下一步有输入到了”，**不告诉你是哪个子代理结算了**，所以不能当“等某个子代理”用。
+  - 🟡 **`interrupt_agent` 漏了两个坑**：它「returns without waiting for it to stop」，且「Subagents it started will keep running」。
+- **删除 `member-persona.mjs`**（2026-11-12，用户决定）：它只覆盖「继承黑猪 preset 的子会话」，而 rc.2 里能让子会话继承该 preset 的路径只剩 `subagent_fork`，已被 `extraDeny` 摘掉；`subagent_preset` 派出的子代理 `ownerPresetId` 不是黑猪（被 `member-persona.mjs` L279 主动放过）。**即它已无任何触发路径**，23,330 B 且内含大量 rc.1 过期描述（`spawn_teammate`、roster、`TEAM_MEMBER_LIMIT`、`childSessionId`），留着是休眠的误导源。四段报告格式改为**由大脑在 brief 里要求**。
+- **人格清理（去死文本 + 去重复）**：
   - 删 `**Agent Teams**` 整段（约 1,907 B）——rc.2 由 `tool-agent-team` 自动注入 `TEAM_POLICY`，覆盖得更全（含 workflow / readiness / write scopes / 根代理必须等队友），本包再写一遍纯属重复。
-  - 删 `spawn_teammate` 相关描述（rc.2 已移除该工具，改用 `subagent` / `subagent_fork` 派活，队友即子代理）。
-  - 删「队友在收窄面之外、能读写跑命令」「队友不可移除 / `TEAM_MEMBER_LIMIT`」「两条通道两套目标」等 rc.1 时代的事实。
-  - **修正参数名 bug**：原文写 `childSessionId`，实测 `send_to_subagent` / `stop_subagent` 的 schema 是 `agent_id` + `agent` 两个字段——原文会让大脑填错字段名导致调用失败。
-  - **修正语义 bug**：原文说「`wait_agent` 和 `list_agents` 看不见 `subagent_preset` 的子代理」。rc.2 里 `list_agents` 的 `project()` 只在 `mode !== "continuable"` 时过滤，而 `subagent_preset` 派的正是 `continuable` → **看得见**；`wait_agent` 等的是收件箱输入（监听 `agent/inbox/inserted`），不是子代理结束。
-  - 新增：`interrupt_agent` 语义（结束当前回合、不杀进程、后续消息可恢复）；`agent_id` 优先于 `agent` 名。
-- **字节**：`persona.prefix` 7,953 → **6,860 B**；`cordis.patch.yml` 37,953 → **38,615 B**。
-- **成本（实测，UTF-8 字节）**：4 个工具定义 **+2,216 B ≈ +690 token，与 Team 开关无关、常驻**（`tool-subagent-control` 的 `apply()` 无条件注册）；人格 **−1,093 B**。**净：Team 关时 +1,123 B；Team 开时另加系统注入 `TEAM_POLICY` 947 B。**
+  - 删 `spawn_teammate` 相关描述（rc.2 已移除该工具）。
+  - 删与工具描述**逐字重复**的 6 处：`list_agents` 看得见整棵树 / 可给任意成员发消息 / 不必反复查状态 / `inactive` 不代表完成；`interrupt_agent` 不等返回 / 子代理继续跑；`wait_agent` 等的是下一步输入。**这些全在宿主工具描述里，人格里重复＝白烧 token。**
+  - `helper` / `teammate` / `worker` 三个称呼统一为 **`subagent`**（与宿主工具描述用词一致）。
+  - 删掉「没有任何工具能跨会话」这句**错误**表述——`schedule_create` 可以跨会话投递文本，正确说法是“代理之间没有跨会话通道”。
+  - 保留系统**确实没有**的四条坑：`DELEGATED_CALLER`（子代理问不了用户）、打断权只向下（兄弟/堂表兄弟不行）、跨会话＝另一棵树、参数名差异。
+- **字节**：`persona.prefix` 7,953 → **6,901 B**；`cordis.patch.yml` 37,953 → **31,345 B**（删 member-persona 块＋人格精简）；`member-persona.mjs` 23,330 B 整个删除。
+- **成本（实测，UTF-8 字节）**：4 个工具定义 **+2,216 B ≈ +690 token，与 Team 开关无关、常驻**（`tool-subagent-control` 的 `apply()` 无条件注册）；人格 **−1,052 B**；member-persona **−23,330 B（代码，非每轮上下文）**。**净每轮：Team 关时 +1,164 B；Team 开时另加系统注入 `TEAM_POLICY` 947 B。**
 
 ### v1.0.5
 

@@ -15,7 +15,6 @@
     "blackpig-roster.mjs",
     "guard-v10.mjs",
     "compat.mjs",
-    "member-persona.mjs",
     "subtalk.mjs",
     "check.ps1",
     "verify.ps1",

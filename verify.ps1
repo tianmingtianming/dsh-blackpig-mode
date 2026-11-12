@@ -127,7 +127,6 @@ $expected = [ordered]@{
     'subtalk.mjs'         = 54964
     'file-info.mjs'       = 31745
     'compat.mjs'          = 26659
-    'member-persona.mjs'  = 23330
     'package.json'        = 745
     'README.md'           = 0       # 不参与校验（随文档编辑变化）
     'LICENSE'             = 1073
