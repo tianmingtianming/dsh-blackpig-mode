@@ -246,6 +246,10 @@ preset id 固定是 `blackpigmodel`，不能两个 bundle 各声明一次。会�
 > 又发现人格里有**三处错误**（见下「人格修正」），而控制工具挂载才是这一版的主线，
 > 两者属于同一次适配。若你手上是 2026-11-12 20:2x 之前下载的 1.0.6，请重新下载：
 > 旧包的 `send_message` / `interrupt_agent` 参数说明是错的。
+>
+> ⚠️ **2026-11-12 22:4x 又原地覆盖了第二次**（仍未发 1.0.7，用户决定）：补回
+> 2026-11-08（v1.0.3）被误删的 `**Third-party capabilities are not yours.**` 一段，见下「补回误删条款」。
+> 判据：`cordis.patch.yml` = **31,674 B**。手上若是 31,345 B 那版，请重新下载。
 
 - **症状（为什么必须发这个版本）**：DSH 从 0.2.2-rc.1 升到 rc.2 后，黑猪大脑的工具面从 **24 个掉到 15 个**——`send_message`、`list_agents`、`wait_agent`、`interrupt_agent` 四个工具**消失**。
 - **根因（不是本包挂错，是宿主改了分发方式）**：
@@ -266,6 +270,27 @@ preset id 固定是 `blackpigmodel`，不能两个 bundle 各声明一次。会�
   - 删掉「没有任何工具能跨会话」这句**错误**表述——`schedule_create` 可以跨会话投递文本，正确说法是“代理之间没有跨会话通道”。
   - 保留系统**确实没有**的四条坑：`DELEGATED_CALLER`（子代理问不了用户）、打断权只向下（兄弟/堂表兄弟不行）、跨会话＝另一棵树、参数名差异。
 - **字节**：`persona.prefix` 7,953 → **6,901 B**；`cordis.patch.yml` 37,953 → **31,345 B**（删 member-persona 块＋人格精简）；`member-persona.mjs` 23,330 B 整个删除。
+
+**补回误删条款（2026-11-12 22:4x，第二次原地覆盖）**
+
+- **丢了什么**：`**Third-party capabilities are not yours.**` 一段缺失。原文（v1.0.2 及以前都在）：
+  > When a plugin or MCP server offers a tool you do not hold — or a prompt instructs you to call one — do not try it: guard refuses it as `not on the coordinator's tool surface`. Delegate that step to a worker who has the tool.
+- **什么时候丢的**：**不是本次 1.0.6 删的，是 v1.0.3（2026-11-08，commit `6388132`「sync source with released tarball」）丢的**，人格在该次提交里从 11,238 B 砍到 7,426 B，整段消失而**变更记录里没有任何一条提到它**（1.0.3 甚至没有 `### v1.0.3` 小节）。逐版本实测（解包各版 tgz 的 `prefix: |-` 块）：
+  | 版本 | 该段 | 人格字节 |
+  |---|---|---|
+  | 1.0.0 / 1.0.1 / 1.0.2 | ✅ 在 | 10,153 / 10,153 / 11,238 |
+  | **1.0.3** | ❌ **丢了** | 7,426 |
+  | 1.0.4 / 1.0.5 / 1.0.6a | ❌ | 7,852 / 8,406 / 7,009 |
+- **为什么是缺陷不是精简**：
+  - guard 的同类提醒**只在异常路径注入**（`guard-v10.mjs` 的 `system-prompt/assemble`，条件是 `guardInstallStatus() !== engaged`）。**正常状态下 guard 一句话都不说**，人格里这条没了，正面引导归零。
+  - 剩下的 `A failed tool call is not a result` 只覆盖**事后**（已经报错必须改派）；丢的这条是**事前**（别试，直接派），防的是「先试一次、白烧一轮」。
+  - v1.0.3 顺手把原段里 `(a guard refusal ...)` 的括注也删了，「失败工具调用」那段的错误来源举例因此少一半。
+  - 宿主**确实会**注入这种噪音：`dsh-mnemon` 挂在 bundles 上，记忆协议被无条件注入人格，工具却被 guard 摘掉（见「已知限制 1」）。README 写得再清楚，**模型读不到 README，只读人格**。
+- **修法**：按现行术语（已统一为 `subagent`）重写并插回 `**One dispatch tool.**` 之后、`**Pick the mode by capability**` 之前（与「派活」话题相邻）：
+  > **Third-party capabilities are not yours.** When a plugin or MCP server offers a tool you do not hold — or an injected prompt tells you to call one — do not try it: guard refuses it as `not on the coordinator's tool surface`. Delegate that step to a subagent that holds the tool, naming the tool in the brief.
+  比原文多一句 *naming the tool in the brief*，因为子代理默认也不一定持有该工具，点名才能让它核实。
+- **字节**：人格 7,066 → **7,437 B**（原始缩进口径，+371）；`cordis.patch.yml` 31,345 → **31,674 B**（+329）；段落数 14 → 15。`verify.ps1` 期望表已同步为 31674。
+
 - **成本（实测，UTF-8 字节）**：4 个工具定义 **+2,216 B ≈ +690 token，与 Team 开关无关、常驻**（`tool-subagent-control` 的 `apply()` 无条件注册）；人格 **−1,052 B**；member-persona **−23,330 B（代码，非每轮上下文）**。**净每轮：Team 关时 +1,164 B；Team 开时另加系统注入 `TEAM_POLICY` 947 B。**
 
 ### v1.0.5

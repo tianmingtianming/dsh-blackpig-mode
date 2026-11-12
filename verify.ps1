@@ -121,7 +121,7 @@ function Find-PresetDeclaration {
 #
 # 维护者改完源码、重新打包后，应把这里更新为 `npm pack` 产物里的实测值。
 $expected = [ordered]@{
-    'cordis.patch.yml'    = 37953
+    'cordis.patch.yml'    = 31674
     'guard-v10.mjs'       = 196819
     'blackpig-roster.mjs' = 102521
     'subtalk.mjs'         = 54964
