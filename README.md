@@ -60,7 +60,7 @@ dsh.cmd plugin --profile <名> add github:tianmingtianming/dsh-blackpig-mode
 ### 2. 次选：从 Release 装（不需要 git）
 
 ```powershell
-dsh.cmd plugin --profile <名> add https://github.com/tianmingtianming/dsh-blackpig-mode/releases/download/v1.0.5/dsh-blackpig-mode-1.0.5.tgz
+dsh.cmd plugin --profile <名> add https://github.com/tianmingtianming/dsh-blackpig-mode/releases/download/v1.0.6/dsh-blackpig-mode-1.0.6.tgz
 ```
 
 ### 3. 兜底：本地 tgz（离线、或上面两条都不通时）
@@ -237,6 +237,26 @@ preset id 固定是 `blackpigmodel`，不能两个 bundle 各声明一次。会�
 ---
 
 ## 变更记录
+
+### v1.0.6
+
+**适配 DSH 0.2.2-rc.2：恢复升级后丢失的 4 个委派控制工具；人格去死文本、修参数名。**
+
+- **症状（为什么必须发这个版本）**：DSH 从 0.2.2-rc.1 升到 rc.2 后，黑猪大脑的工具面从 **24 个掉到 15 个**——`send_message`、`list_agents`、`wait_agent`、`interrupt_agent` 四个工具**消失**。
+- **根因（不是本包挂错，是宿主改了分发方式）**：
+  - rc.1 的 `@deepseek-ai/dsh-experimental-agent-team-profile` bundle 在全局层 `disabled: true` 掉 `tool-subagent-control` / `tool-subagent` / `tool-subagent-fork`，再由 `dsh-experimental-tool-agent-team` **一个包注册全部 9 个团队工具**。黑猪 preset 不挂任何工具，靠宿主全局注入也拿得到——这符合「保持通用性、不写死第三方工具」的设计原则。
+  - rc.2 用 `RETIRED_BUNDLES` 退役该 bundle，把工具**拆成两个插件**：`dsh-tool-agent-team` → `team_task_*`（仍由 base 全局挂、受会话级 Team 开关控制）；`dsh-tool-subagent-control` → `send_message` / `list_agents` / `wait_agent` / `interrupt_agent`（**改为各 preset 自己声明**）。
+  - `standard.patch.yml` 声明了 `tool-subagent-control`（所以 standard 一直有这 4 个工具），**黑猪 preset 从没声明过** → rc.2 起这 4 个工具无提供者。
+- **修法**：黑猪 preset 的 `plugins` 里补挂 `@deepseek-ai/dsh-tool-subagent-control`（`interrupt: true`）。该行不含任何第三方/项目私有引用，`inject` 只有 `tools/subagents/agents/systemPrompt` 四个通用服务，**不违反「不写死第三方工具名」红线**。
+- **人格清理（去死文本 + 修错）**：
+  - 删 `**Agent Teams**` 整段（约 1,907 B）——rc.2 由 `tool-agent-team` 自动注入 `TEAM_POLICY`，覆盖得更全（含 workflow / readiness / write scopes / 根代理必须等队友），本包再写一遍纯属重复。
+  - 删 `spawn_teammate` 相关描述（rc.2 已移除该工具，改用 `subagent` / `subagent_fork` 派活，队友即子代理）。
+  - 删「队友在收窄面之外、能读写跑命令」「队友不可移除 / `TEAM_MEMBER_LIMIT`」「两条通道两套目标」等 rc.1 时代的事实。
+  - **修正参数名 bug**：原文写 `childSessionId`，实测 `send_to_subagent` / `stop_subagent` 的 schema 是 `agent_id` + `agent` 两个字段——原文会让大脑填错字段名导致调用失败。
+  - **修正语义 bug**：原文说「`wait_agent` 和 `list_agents` 看不见 `subagent_preset` 的子代理」。rc.2 里 `list_agents` 的 `project()` 只在 `mode !== "continuable"` 时过滤，而 `subagent_preset` 派的正是 `continuable` → **看得见**；`wait_agent` 等的是收件箱输入（监听 `agent/inbox/inserted`），不是子代理结束。
+  - 新增：`interrupt_agent` 语义（结束当前回合、不杀进程、后续消息可恢复）；`agent_id` 优先于 `agent` 名。
+- **字节**：`persona.prefix` 7,953 → **6,860 B**；`cordis.patch.yml` 37,953 → **38,615 B**。
+- **成本（实测，UTF-8 字节）**：4 个工具定义 **+2,216 B ≈ +690 token，与 Team 开关无关、常驻**（`tool-subagent-control` 的 `apply()` 无条件注册）；人格 **−1,093 B**。**净：Team 关时 +1,123 B；Team 开时另加系统注入 `TEAM_POLICY` 947 B。**
 
 ### v1.0.5
 
