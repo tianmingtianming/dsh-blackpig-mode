@@ -250,6 +250,8 @@ preset id 固定是 `blackpigmodel`，不能两个 bundle 各声明一次。会�
 > ⚠️ **2026-11-12 22:4x 又原地覆盖了第二次**（仍未发 1.0.7，用户决定）：补回
 > 2026-11-08（v1.0.3）被误删的 `**Third-party capabilities are not yours.**` 一段，见下「补回误删条款」。
 > 判据：`cordis.patch.yml` = **31,674 B**。手上若是 31,345 B 那版，请重新下载。
+> （这里不写 tgz 的字节数——README 自己在包内，写包体大小是自我指涉、每改一次就失效；
+> 认包请认 Release 页面上显示的资产大小与 `cordis.patch.yml` 的 31,674 B。）
 
 - **症状（为什么必须发这个版本）**：DSH 从 0.2.2-rc.1 升到 rc.2 后，黑猪大脑的工具面从 **24 个掉到 15 个**——`send_message`、`list_agents`、`wait_agent`、`interrupt_agent` 四个工具**消失**。
 - **根因（不是本包挂错，是宿主改了分发方式）**：
