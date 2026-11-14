@@ -1,0 +1,109 @@
+{
+  "version": 1,
+  "note": "黑猪预设能力基准。TOOLS 已剔除第三方插件工具（mnemon/remote/im/blender），为装裸 DSH 即有的通用工具。用户可复制到 ~/.dsh/blackpig-preset-caps.json 覆盖，或改 suitableFor/notSuitableFor 文本。",
+  "testedAt": "2026-11-14",
+  "testedOn": "DSH 0.2.2-rc.3 / desktop profile",
+  "presets": {
+    "standard": {
+      "tools": [
+        "ask_user_question",
+        "create_goal",
+        "edit",
+        "get_goal",
+        "glob",
+        "grep",
+        "job_kill",
+        "job_list",
+        "job_output",
+        "list_agents",
+        "list_subagent_models",
+        "load_workspace_dependencies",
+        "plugin_manager",
+        "present",
+        "pwsh",
+        "read",
+        "read_image",
+        "schedule_create",
+        "schedule_edit",
+        "schedule_list",
+        "schedule_view",
+        "send_message",
+        "skill",
+        "subagent",
+        "subagent_fork",
+        "todo_write",
+        "update_goal",
+        "wait_agent",
+        "web_fetch",
+        "web_search",
+        "workflow",
+        "working_directory",
+        "write"
+      ],
+      "toolCount": 33,
+      "suitableFor": "本地代码与文件读写、shell 执行、子代理与工作流编排、插件管理、定时任务、联网取资料。",
+      "notSuitableFor": "没有浏览器 DOM/截图/点击工具，也没有图像生成与多媒体工具，所以不能操作网页界面、不能生成图片、不能做剪辑渲染。"
+    },
+    "ptc": {
+      "tools": [
+        "run_code"
+      ],
+      "toolCount": 1,
+      "suitableFor": "写 TypeScript 程序批量编排工具调用，做循环、并发、过滤与聚合，只回传精简结论，适合大批量调用省上下文。",
+      "notSuitableFor": "只有一个 run_code，不能直接逐个调工具，每次都得先写程序；依赖交互审批或人工确认的活干不了。"
+    },
+    "minimal": {
+      "tools": [
+        "load_workspace_dependencies",
+        "pwsh",
+        "read_image",
+        "working_directory"
+      ],
+      "toolCount": 4,
+      "suitableFor": "用 shell 在本机排查故障、跑脚本，读取图片，做极简对照测试。",
+      "notSuitableFor": "没有文件读写与搜索工具，只能靠 shell 命令；不能派子代理、不能联网检索，不适合批量改文件、多代理协作与检索类任务。"
+    },
+    "cordis": {
+      "tools": [
+        "ask_user_question",
+        "cordis_inspect_list",
+        "cordis_inspect_query",
+        "create_goal",
+        "edit",
+        "get_goal",
+        "glob",
+        "grep",
+        "job_kill",
+        "job_list",
+        "job_output",
+        "list_agents",
+        "list_subagent_models",
+        "load_workspace_dependencies",
+        "plugin_manager",
+        "present",
+        "pwsh",
+        "read",
+        "read_image",
+        "schedule_create",
+        "schedule_edit",
+        "schedule_list",
+        "schedule_view",
+        "send_message",
+        "skill",
+        "subagent",
+        "subagent_fork",
+        "todo_write",
+        "update_goal",
+        "wait_agent",
+        "web_fetch",
+        "web_search",
+        "workflow",
+        "working_directory",
+        "write"
+      ],
+      "toolCount": 35,
+      "suitableFor": "开发调试 DSH 插件与 preset、查看运行时组合树，配合文件与 shell 做端到端验证。",
+      "notSuitableFor": "缺浏览器 DOM/截图/点击与图像、多媒体工具，不能操作网页界面、不能生成图片、不能做剪辑渲染。"
+    }
+  }
+}

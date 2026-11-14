@@ -184,14 +184,16 @@ preset id 固定是 `blackpigmodel`，不能两个 bundle 各声明一次。会�
 
 ## 文件说明
 
-12 个条目，一句话一个（其中三个不参与字节校验，见下）：
+14 个条目（v1.0.7 新增 `defaults/preset-caps.json` 与 `docs/preset-bench.md`），一句话一个（其中三个不参与字节校验，见下）：
 
 | 文件 | 作用 |
 | --- | --- |
 | `cordis.patch.yml` | 整套 preset 声明：1 个 `insert`，25 个顶层插件行（其中 2 个是 `cordis:group`，组内还有 4 行），人格前缀整段内联在这里 |
 | `guard-v10.mjs` | 大脑的工具面收窄与硬拦：`deny = 可见集 − 保留集`，只在大脑自己的 agent scope 上装；另有**两处结构性摘除**作用于队友（guard 摘 `spawn_teammate`、subtalk 摘 `stop_subagent`），那不是收窄 |
 | `compat.mjs` | **委派控制接口兼容层**：`detectControlApi` / `callSendMessage` / `resolveTargetId` / `applyToTools`。旧宿主的 `agent_id` 与新宿主的 `agent`（名字）在这里归一化，调用点不再各判一遍版本 |
-| `blackpig-roster.mjs` | `subagent_preset` 工具 + 代理名册：列出每个模式的能力标签，支持 `list` / `ask` / `detail` 三种查询 |
+| `blackpig-roster.mjs` | `subagent_preset` 工具 + 代理名册：名册**只读静态基准文件** `preset-caps.json`（用户文件优先，回退包内 `defaults/`）；`list: true` 出能力名册；派活走活的注册表校验 |
+| `defaults/preset-caps.json` | 内置的 4 个 DSH 模式基准数据（工具数 + 适合/不适合），名册的回退来源 |
+| `docs/preset-bench.md` | 基准测试怎么做、结果写哪、怎么隐藏 / 禁用模式 |
 | `subtalk.mjs` | `send_to_subagent` / `stop_subagent`：与已派出的代理继续对话或叫停，冷恢复它自己的上下文 |
 | `file-info.mjs` | `file_info`：只 stat 不读内容，给类型 / 存在性 / 字节数，一次调用可覆盖一组路径 |
 | ~~`member-persona.mjs`~~ | **已于 v1.0.6 删除（2026-11-12）**：rc.2 下它无任何触发路径（唯一能让子会话继承黑猪 preset 的 `subagent_fork` 已被 `extraDeny` 摘掉；`subagent_preset` 派出的子代理归属别的 preset，被 L279 主动放过）。四段报告格式改由大脑在 brief 里要求 |
@@ -209,6 +211,88 @@ preset id 固定是 `blackpigmodel`，不能两个 bundle 各声明一次。会�
 
 - `package.json` 里的 `"exports": { "./*": "./*" }` **不能删**。preset 挂载时 baseUrl 是 profile 根，5 个本地插件是以 `dsh-blackpig-mode/xxx.mjs` 这种子路径解析到本包的，靠的就是这条 exports。
 - 对外挂载的插件用包名子路径解析（`dsh-blackpig-mode/xxx.mjs`）；包内相对引用只有一条：`subtalk.mjs` → `compat.mjs`（`./compat.mjs`），指向同目录、随包一起分发，所以整个包仍可整体搬运。**打包时 `compat.mjs` 必须在 `package.json` 的 `files` 里**，漏了会在装载时直接 `ERR_MODULE_NOT_FOUND`。
+
+---
+
+## 基准数据与模式清单（v1.0.7 起）
+
+**`list: true` 返回的名册只读 `preset-caps.json`，不查宿主注册表、不做能力推导。**
+
+v1.0.6 及以前，名册是把「这个模式装载了哪些模块」映射成能力词（`files` / `shell` / `CAN-SPAWN-SUBAGENTS` …）。
+那条路有两个硬伤：宿主的 `definitions(scope)` 要求 scope 是活跃 Agent，所以**运行时真实可调用的工具名
+静态拿不到**（官方原文：a tool schema is not statically knowable）；而且工具集随插件增减而变，
+手维护的映射表必然过期。于是 v1.0.7 改成「跑一次基准测试，把答案存成 JSON，名册读它」。
+
+现在的名册长这样（真机返回，逐字）：
+
+```text
+Agent modes with a benchmark entry (preset-caps.json) — installed modes missing from this list can still be dispatched if you know their id
+
+- standard (33 tools)
+  suitable: 本地代码与文件读写、shell 执行、子代理与工作流编排、插件管理、定时任务、联网取资料。
+  not suitable: 没有浏览器 DOM/截图/点击工具，也没有图像生成与多媒体工具，所以不能操作网页界面、不能生成图片、不能做剪辑渲染。
+- ptc (1 tool)
+  suitable: 写 TypeScript 程序批量编排工具调用，做循环、并发、过滤与聚合，只回传精简结论，适合大批量调用省上下文。
+  not suitable: 只有一个 run_code，不能直接逐个调工具，每次都得先写程序；依赖交互审批或人工确认的活干不了。
+```
+
+**默认只含 4 个内置模式**（`standard` / `ptc` / `minimal` / `cordis`），来自包内
+`defaults/preset-caps.json`（2026-11-14 在 DSH 0.2.2-rc.3 上实跑）。名册**不会自动发现**你装的模式 ——
+不在基准文件里的模式不显示，这不是装坏了。
+
+#### 设置页里的「dsh-blackpig-mode」基准测试页面（v1.0.7，2026-11-15）
+
+跑基准测试需要一整段提示词。以前它只躺在本文档里，要自己复制；现在**设置页里有独立页面**：
+
+**设置 → dsh-blackpig-mode** → 右上「复制提示词」→ 直接粘给黑猪。
+
+- 页面正文就是 `docs/preset-bench.md` 里那段提示词的全文（保留换行）。
+- 它**只做展示与复制**，不读也不改任何配置；删掉 `cordis.patch.yml` 末尾的 `blackpig-client` 行即可移除。
+- 为什么不是「插件 → 内置插件配置」：那个分组只收 `plugins.item` 注册项。本包改注册 `settings.section`
+  （设置导航里的一级页面，与 dsh-multitask 同一座位），因此**不再出现在插件页任何分组里**。
+- 为什么不用 `plugins.bundle.config`：它只在组合包详情页内渲染，而本包在插件页**根本列不出来** ——
+  宿主 `listed` 过滤要求 `installed` / `official` / `error` 三者之一，本包写在 `optionalDependencies` 里
+  所以 `installed=false` 且无 error。挂了也点不到。
+
+### 想知道「这台机器到底装了哪些模式」→ 派 worker 读配置
+
+名册答不了这个问题（它只显示基准文件里有的模式）。**v1.0.7 第三轮（2026-11-14）已移除 `list: { all: true }`**，
+改用下面这条路 —— 黑猪自己没有 `read` / `grep`，但**它可以派一个有这些工具的 worker 去读 `cordis.patch.yml`**：
+
+```text
+派一个 standard 模式的 worker，让它读 <DSH_HOME>/profiles/<profile>/cordis.patch.yml，
+找所有 name 为 "@deepseek-ai/dsh-agent-preset" 的声明行，取各自 config.id，
+加上 4 个内置（standard/ptc/minimal/cordis），报回完整 id 列表。
+注意外层实例名（如 preset-blender-worker）不是真正的 id，真正的 id 在 config.id 里。
+```
+
+黑猪（depth 0）派 worker ⇒ worker 是 depth 1，远低于本项目 `maxDepth: 2`，不占额外层级。
+
+**为什么删掉 `list: { all: true }`**（1.0.7 第二轮加、第三轮删），两条理由：
+
+1. **只服务基准测试，日常无用。** 日常只有 `list: true`（读 `preset-caps.json`）和 `delegate` 两个动作。
+2. **它绕过 `hidden` 过滤。** `renderRoster()`（`blackpig-roster.mjs:342-386`）有两道过滤 ——
+   `:364` 跳过自己、`:370` 跳过 `hidden: true`；而 `renderAllPresetIds()`（原 `:416-445`，已删除）
+   **完全不读 `preset-caps.json`、不判断 hidden**。留着它等于开一条「名册藏起来、`all: true` 却能列出来」的后门，
+   而且 hidden 模式、自己、不在 caps.json 的、broken 的四类 id 全漏。
+
+现在 `list` 参数是**纯 boolean**，传对象会被宿主 schema 直接拒绝。基准测试怎么拿 id 清单，见包内
+**`docs/preset-bench.md`** 第三节（有现成 prompt 模板）。
+
+**自定义模式要自己跑一次基准测试**，把结果写进 `~/.dsh/blackpig-preset-caps.json`（用户文件优先于包内默认）。
+怎么跑、返回格式、字段含义，见包内 **`docs/preset-bench.md`**，那里有一段可以直接复制的 prompt。
+
+三件事分清楚：
+
+| 想做的事 | 怎么做 | 效果 |
+| --- | --- | --- |
+| 改描述文字 | 编辑 `preset-caps.json` 里那个模式的 `suitableFor` / `notSuitableFor` | 名册里那两行文字变了 |
+| 只在名册里不显示 | 该模式加 `"hidden": true` | `list: true` 看不到它；**`delegate` 仍能派给它** |
+| 彻底禁用（不许派） | 黑猪 `cordis.patch.yml` 里 `blackpig-roster` 的 config 加 `disabledPresets: [mode-id]` | `delegate` 回 `preset-disabled`（stop: true） |
+
+> ⚠️ 两个「看不到」的坑：**名册看不到 ≠ 派不了**（`hidden: true` / 不在 JSON 里，都只是不显示）；
+> **派活永远是活的校验** —— `delegate` 读 `agentPresets` 注册表确认目标存在且没坏，与基准文件无关。
+> 所以基准文件写错只会让名册难看，不会让派活失败。要真禁用必须用 `disabledPresets`。
 
 ---
 
@@ -237,6 +321,84 @@ preset id 固定是 `blackpigmodel`，不能两个 bundle 各声明一次。会�
 ---
 
 ## 变更记录
+
+### v1.0.7
+
+**简化版：名册改成读静态基准文件 `preset-caps.json`；砍掉 `detail` / `ask` 两条查询分支。**
+
+这一版只动名册与查询，**派活逻辑一行未改**（`delegate()` 原样保留，含它自己的活校验）。
+
+- **新增 `defaults/preset-caps.json`**（3,578 B）：内置 4 个模式（standard / ptc / minimal / cordis）的工具数
+  与「适合 / 不适合」说明。名册的回退数据源。
+- **新增 `docs/preset-bench.md`**：基准测试怎么跑（一段可复制 prompt）、结果写哪、怎么隐藏 / 禁用模式。
+- **`list: true` 改为「只读 JSON，不查注册表」**：渲染 4 行/模式以内，输出约 600–900 B
+  （4 个内置模式实测 1,392 B；首版 1,296 B，2026-11-15 修名册表头后 +96 B），不再出现
+  `files` / `shell` / `CAN-SPAWN-SUBAGENTS` / `?module` 这类推导标签。
+  读取顺序：`~/.dsh/blackpig-preset-caps.json` → 包内 `defaults/preset-caps.json` → 都没有则明确回
+  `preset-caps-missing` + 「未找到基准数据」并列出试过的路径（**不编造模式**）。
+- **删除 `detail: true` 分支**（读单个 preset 的 YAML 声明）：名册已经写了「适合 / 不适合」，不需要再拉声明。
+  连带删除 `readPresetDetail()`、`DETAIL_MAX_BYTES`、`config.detailMaxBytes`。
+- **删除 `ask: true` 分支**（起一个短 worker 让模式自述能力）：同样被基准文件取代。
+  连带删除 `extractProbeText()`、`probe_prompt` 参数。
+- **删除能力推导链**：`DEFAULT_CAPABILITY_HINTS`（模块名→能力词映射）、`HIDDEN_MODULES`、`shortLabel()`、
+  `compositionToTags()`。名册不再调用 `compositionInventory()`，也不再需要 `config.capabilityHints`。
+- **新增 `config.disabledPresets`**：`delegate` 的部署级硬闸，命中回 `preset-disabled`。与基准文件里的
+  `hidden: true`（只隐藏、仍可派）是两件事。
+- **工具参数只剩 4 个**：`preset` / `prompt` / `description` / `list`。
+- **人格改写**：`cordis.patch.yml` 里「能力不清楚时先 `ask: true` 再 `detail: true`」那半句删掉，改为读名册的
+  适合/不适合说明，仍不清楚就问用户。
+
+#### v1.0.7 追加（2026-11-15 第五轮）：名册字节上限**整体移除**
+
+**名册现在永远输出完整内容**，不再有任何字节预算、不再截断、不再加 ` …`。
+
+- **删掉的东西**：`ROSTER_HARD_CAP_BYTES`（= 4000）常量、`truncateWithSuffix()`、`clipToBytes()`、
+  `bytes()`、`renderRoster()` 内的 `clampToCap()` / `nonEmptyFallback()`、`config.rosterMaxBytes`
+  配置项，以及 `render()` / `renderRoster()` 的 `capBytes` 形参。所有「超顶就截」的分支一并删除，
+  `degraded` 列表也**永远完整**输出。
+- **为什么删**：4,000 B 这个上限是为「一个部署装几十上百个模式」这种**不存在的场景**设防的。
+  模式数量天然有限（本机 8 个，极端部署也就几十个），而代价是真实名册被砍掉一半、
+  模型看不到被丢掉的模式——**为一个假想场景牺牲真实可用性**。
+- **认包判据**：`blackpig-roster.mjs` **36,302 B**（改前 43,116 B，−6,814 B）；`cordis.patch.yml`
+  **31,632 B**（改前 31,516 B，+116 B，只改了注释）；`verify.ps1` 内置表同步为 36302 / 31632。
+- **行为差异**：装 8 个模式时名册约 2.8 KB 以上（完整输出，不再被 4,000 B 截）；模式越多越长，
+  这是**有意为之**。
+
+#### v1.0.7 追加（2026-11-15）：人格去重精简 −1,020 B
+
+只改 `cordis.patch.yml` 的 `persona.prefix` 正文，**代码一行未动**（7 个代码文件
+`blackpig-roster.mjs` / `compat.mjs` / `file-info.mjs` / `guard-v10.mjs` / `index.mjs` / `lib/client.js` /
+`subtalk.mjs` 逐字节不变）。
+
+- **人格正文 7,669 B → 6,649 B（−1,020 B，约 −255 token，常驻每轮）**；`cordis.patch.yml`
+  **32,536 → 31,516 B**（`verify.ps1` 内置期望表已同步为 31516）。
+- **段落数仍是 15，顺序未变**：只做「删重复句 + 删过时句」，没有增删段落、没有搬段。
+- 改动最大的三段：`Pick the mode by capability…` −649 B（删掉「永远不要从模式名推断能力」整段重复论证、
+  删掉「按 suitable/not suitable 逐行挑最小档」这句与名册表头自相矛盾的指示）、
+  `Two tools take two names…` −193 B（删掉与工具 schema 逐字重复的参数说明）、`You do not do the work…` −99 B。
+- 判据（`--dump-config` 合成树）：新措辞 `Your verification tools (\`file_info\`, \`read_image\`, \`job_output\`)`
+  命中 1、旧措辞 `Your read-only verification tools are` 命中 0；`take the \`agent\` **name**` 命中 1；
+  `The roster no longer carries capability labels` 命中 0。
+
+#### v1.0.7 追加（2026-11-14 同日第二轮）：`list: { all: true }` —— **第三轮已撤回**
+
+> 🔴 **2026-11-14 第三轮：`list: { all: true }` 已删除，`list` 回到纯 boolean。**
+> 下面这段是历史记录，**不要再按它用**。删它的两条理由：①只服务基准测试，日常只用 `list: true` + `delegate`；
+> ②它绕过 `hidden` 过滤（`renderAllPresetIds()` 不读 caps.json、不判 hidden，而 `renderRoster()` 会跳过
+> self 与 `hidden: true`）。替代方案：派一个 standard worker 读 `cordis.patch.yml`（见上文与 `docs/preset-bench.md` 第三节）。
+
+第二轮曾这么改（**已撤回**）：
+
+- ~~`list` 参数从 `z.boolean` 扩成两形态~~：`list: true` 与 `list: { all: true }`。→ **已删除，现只接受 boolean**。
+- ~~新增 `renderAllPresetIds()`~~（约 40 行，模块级）：读 `registry.list()`，只回 id。
+  → **函数已整体删除**（连同它专用的 `clampRosterText()`）。
+- ~~schema 用 `oneOf: [boolean, object]`~~ → **schema 回到 `{ type: 'boolean' }`**，传对象会被宿主拒绝。
+- ~~registry 取不到 → `registry-unavailable`；`list()` 抛错 → `registry-unreadable`；空表 → `degraded: ['registry-empty']`~~
+  → 这三条回执随分支一起消失。
+- **`delegate()` 一行未改**（两轮都没动）。
+
+> 升级注意：`blackpig-roster.mjs` 现在 **42,898 B / 886 行**（第二轮 48,573 B / 1,008 行；v1.0.6 是 102,521 B）。
+> `cordis.patch.yml` = 31,175 B。装完必须**重启 DSH** 才生效（插件在启动期装载）。
 
 ### v1.0.6
 
@@ -310,7 +472,7 @@ preset id 固定是 `blackpigmodel`，不能两个 bundle 各声明一次。会�
 
 - 症状（这条规则要防的）：把「任务重要 / 难 / 复杂」当成「该抬档」的理由，于是派活时选了一个能力更大、工具更多的模式，活本身并不需要那些工具，只是白背一堆用不上的工具面。
 - 修法：大脑人格里**改写**了原有的 `Pick the mode by capability, never by name` 这一段（不是新增一段重复规则），标题改为 `Pick the mode by capability, never by difficulty — and never by name`，并明确：难不代表所需能力多；抬档不会让活干得更好；只问一句「这活需要哪些额外能力」，没有就用最小档；「重要 / 看起来很难」**不是**抬档理由（这是反面示例，已在同一段里明写禁止）。
-- 不写死任何模式名或能力清单（不出现具体模式 id、参数名、能力词表）—— 模式清单会改名、会增删。段落里出现的 `harness-dev` / `plugin-admin` / `plugin-market` 是**改前就有的**危险能力标签，本次未改动、也不算模式名。
+- 不写死任何模式名或能力清单（不出现具体模式 id、参数名、能力词表）—— 模式清单会改名、会增删。段落里出现的 `harness-dev` / `plugin-admin` / `plugin-market` 是**改前就有的**危险能力标签，v1.0.4 那次未改动、也不算模式名（**这 3 个标签已于 2026-11-15 的 v1.0.7 人格修正里整条删除**，见「2026-11-15 人格修正」一节）。
 - 队友人格（`member-persona.text`）里的同名段落**未改**：那条是给队友「再往下派活」用的，本次只动大脑。
 - 已知代价：`verify.ps1` 里 `cordis.patch.yml` 的期望字节数随本次重新打包同步更新（**具体数字见脚本内置表，本文不再抄写——抄一次就会过期**）。
 - **同版另修（面向所有 GitHub 下载者的通用性）**：
@@ -388,7 +550,7 @@ DSH 下一版（master，未发版）把委派控制接口改了两件事，任�
 
 ## English summary
 
-`dsh-blackpig-mode` is an agent preset for DeepSeek Harness (DSH). The coordinator agent holds **no hands-on tools**: no file reads, no shell, no web search or fetch. Its only verification surface is `file_info` (file kind, existence, byte count) plus `read_image`. All actual work is delegated to subagents through a single required-argument tool, `subagent_preset`.
+`dsh-blackpig-mode` is an agent preset for DeepSeek Harness (DSH). The coordinator agent holds **no hands-on tools**: no file reads, no shell, no web search or fetch. Its read-only verification surface is `file_info` (file kind, existence, byte count), `read_image`, and `job_output` (raw output of a background job); none of them can read a source file. All actual work is delegated to subagents through a single required-argument tool, `subagent_preset`.
 
 ### Origin
 

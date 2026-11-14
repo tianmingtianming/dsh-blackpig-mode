@@ -121,28 +121,33 @@ function Find-PresetDeclaration {
 #
 # 维护者改完源码、重新打包后，应把这里更新为 `npm pack` 产物里的实测值。
 $expected = [ordered]@{
-    'cordis.patch.yml'    = 31674
-    'guard-v10.mjs'       = 196819
-    'blackpig-roster.mjs' = 102521
+    'cordis.patch.yml'    = 31632
+    'guard-v10.mjs'       = 196941
+    'blackpig-roster.mjs' = 36302
     'subtalk.mjs'         = 54964
     'file-info.mjs'       = 31745
     'compat.mjs'          = 26659
-    'package.json'        = 719
+    'package.json'        = 914
     'README.md'           = 0       # 不参与校验（随文档编辑变化）
     'LICENSE'             = 1073
     'check.ps1'           = 0       # 在 $skipSizeCheck 里，不参与比对（旧值 13564 早已失效）
     'verify.ps1'          = 0       # 自引用：写死自身字节必然追不上，不参与校验
+    'defaults/preset-caps.json' = 3578   # v1.0.7 基准数据：改坏会让名册失真，加一道闸
+    'docs/preset-bench.md'      = 0      # 文档，随编辑变化（只校验存在性）
+    'index.mjs'                 = 918    # v1.0.7：裸包名行（让 dsh.client 被发现的空壳）
+    'lib/client.js'             = 9997   # v1.0.7：浏览器半边（设置页一级页面「dsh-blackpig-mode」基准提示词）
 }
 
 # 不参与字节校验的文件（允许编辑，或换行符随 git 配置变化）：
 #   README.md  —— 随文档更新
 #   verify.ps1 —— 自身，改一次字节就变，参与校验必然自死循环
+#   docs/preset-bench.md —— 随文档编辑变化（v1.0.7 新增；只校验存在性）
 #   check.ps1  —— 该脚本本身随检查项增删而变。.gitattributes 的 *.ps1 text eol=lf 只保证
 #                 入库与打包的换行符口径是 LF，并不保证「包内文件 = 源码 = 已安装副本」三者
 #                 字节数一致（已安装副本可能是上次打包留下的，会落后于源码，见重打包待办）。
 #                 真正跳过的理由是：写死字节的期望值必然追不上脚本编辑。
 # 注意：不要改用 SHA256 —— 换行符口径一变、或副本落后一个版本，SHA 同样对不上。
-$skipSizeCheck = @('README.md', 'check.ps1', 'verify.ps1')
+$skipSizeCheck = @('README.md', 'check.ps1', 'verify.ps1', 'docs/preset-bench.md')
 
 $dshHome    = Get-DshHome
 $profileDir = Join-Path (Join-Path $dshHome 'profiles') $Profile

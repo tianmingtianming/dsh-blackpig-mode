@@ -1,13 +1,14 @@
 {
   "name": "dsh-blackpig-mode",
-  "version": "1.0.6",
+  "version": "1.0.7",
   "private": false,
   "description": "黑猪模式（Black Pig Mode）— 一个 DSH agent preset bundle：大脑只判断/派活/汇总，动手能力下放队友。",
   "type": "module",
-  "main": "guard-v10.mjs",
+  "main": "./index.mjs",
   "exports": {
-    ".": "./guard-v10.mjs",
-    "./*": "./*"
+    ".": "./index.mjs",
+    "./*": "./*",
+    "./client": "./lib/client.js"
   },
   "files": [
     "cordis.patch.yml",
@@ -18,11 +19,19 @@
     "subtalk.mjs",
     "check.ps1",
     "verify.ps1",
-    "README.md"
+    "README.md",
+    "defaults/preset-caps.json",
+    "docs/preset-bench.md",
+    "index.mjs",
+    "lib/client.js"
   ],
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": []
     }
   },
   "keywords": [

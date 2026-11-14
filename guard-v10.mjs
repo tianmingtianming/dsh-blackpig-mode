@@ -251,7 +251,8 @@ const DEFAULT_KEEP = [
   'read_image',
   'working_directory',
   // 只读元数据：字节数 / 类型 / 存在性 / 一次多路径的总和。
-  // 它是**砍掉 read 之后唯一的核实手段**，必须在这个保留集里。
+  // 它是砍掉 read 之后查「存在性 / 字节数」的手段之一（另有 read_image、job_output），
+  // 但只有它能一次查多个路径并给出总字节数，必须在这个保留集里。
   'file_info',
 
   // ── 与一次性代理继续对话（本层注册，restrict 摘不掉、必须进保留集）──
