@@ -20,7 +20,7 @@
 
 做完发现一个人生的真谛：**人生的上下文只有这么长，一定要用大部分时间去做自己愿意做的事。**
 
-技术上怎么落到这套代码上：读文件会吃掉上下文，所以把「读」这件事交给 helper——主对话的 `read` 与 `grep` 一起从工具面上摘掉（留 `grep` 等于留半个 `read`，纪律不成立），只保留两类验证工具：`file_info`（查文件类型 / 是否存在 / 字节数）和 `read_image`（看图）。这个取舍是有意识的：**代价是规划者看不到文件内容**，想知道里面写了什么，只能靠 brief 再派一个人去看，并要求带回行号和原文；**换来的是上下文不被文件内容吃掉**，主对话只承载结论和判断。所以 brief 必须自包含，验证必须换人做，汇报必须带证据——这三条不是风格要求，是这个交换成立的前提。
+技术上怎么落到这套代码上：读文件会吃掉上下文，所以把「读」这件事交给 helper——主对话的 `read` 与 `grep` 一起从工具面上摘掉（留 `grep` 等于留半个 `read`，纪律不成立），只保留只读验证工具：`file_info`（查文件类型 / 是否存在 / 字节数）、`ls`（列目录条目名）、`read_image`（看图）与 `job_output`（后台任务原始输出）。这个取舍是有意识的：**代价是规划者看不到文件内容**，想知道里面写了什么，只能靠 brief 再派一个人去看，并要求带回行号和原文；**换来的是上下文不被文件内容吃掉**，主对话只承载结论和判断。所以 brief 必须自包含，验证必须换人做，汇报必须带证据——这三条不是风格要求，是这个交换成立的前提。
 
 发出来只是为了让朋友们装起来方便——不是产品，没有客服，也没有维护承诺。代码里会有粗糙的地方，取舍也带着明显的个人偏好。**能用，但别当作品看。**
 
@@ -36,9 +36,9 @@
 
 | 设计 | 做法 | 约束住的是什么 |
 | --- | --- | --- |
-| 规划者无读取工具 | `guard-v10.mjs` 在大脑自己的 agent scope 上装 `tools.restrict()` + `tools.guard()`，`DEFAULT_KEEP` 共 **27** 个名字，其中 `subagent` / `subagent_fork` 被 `extraDeny` 一票否决（它们留在默认表里只是「撤销 extraDeny 即可恢复」的配置回滚位，**不参与可用计数**），经 `extraDeny` 后**实际可用 25 个**，分七类：核实 2 个（`file_info`（类型/存在性/字节数）、`read_image`）；派活 3 个（`subagent_preset`、`send_to_subagent`、`stop_subagent`）；团队协作 9 个（`spawn_teammate`、`send_message`、`list_agents`、`interrupt_agent`、`wait_agent`、`team_task_create` / `list` / `get` / `update`）；后台任务 3 个（`job_list` / `job_output` / `job_kill`）；长期目标 3 个（`create_goal` / `get_goal` / `update_goal`）；交互与自我管理 4 个（`todo_write`、`present`、`ask_user_question`、`working_directory`）；计划模式条件注册 1 个（`exit_plan_mode`）；**2+3+9+3+3+4+1 = 25** | 强制出信息压缩边界：过程数据进不了主对话 |
+| 规划者无读取工具 | `guard-v10.mjs` 在大脑自己的 agent scope 上装 `tools.restrict()` + `tools.guard()`，`DEFAULT_KEEP` 共 **28** 个名字，其中 `subagent` / `subagent_fork` 被 `extraDeny` 一票否决（它们留在默认表里只是「撤销 extraDeny 即可恢复」的配置回滚位，**不参与可用计数**），经 `extraDeny` 后**实际可用 26 个**，分七类：核实 2 个（`file_info`（类型/存在性/字节数）、`ls`（只列目录条目名））；看图 1 个（`read_image`）；派活 3 个（`subagent_preset`、`send_to_subagent`、`stop_subagent`）；团队协作 9 个（`spawn_teammate`、`send_message`、`list_agents`、`interrupt_agent`、`wait_agent`、`team_task_create` / `list` / `get` / `update`）；后台任务 3 个（`job_list` / `job_output` / `job_kill`）；长期目标 3 个（`create_goal` / `get_goal` / `update_goal`）；交互与自我管理 4 个（`todo_write`、`present`、`ask_user_question`、`working_directory`）；计划模式条件注册 1 个（`exit_plan_mode`）；**2+1+3+9+3+3+4+1 = 26** | 强制出信息压缩边界：过程数据进不了主对话 |
 | brief 必须自包含 | 队友看不到主对话，只看得到 brief。人格与工具描述都要求「点名文件路径、行号、具体改什么」，禁止「按你刚才的发现去修」 | 派活必须先把信息压成一份可执行的说明书 |
-| 验证必须独立 | 主对话只剩 `file_info` 和 `read_image`，能证明「文件存在 / 多大 / 是否为空」，证明不了「里面写了什么」。要问内容，只能再派一个人去看 | 自己验自己会互相印证错误；独立验证要求换人 |
+| 验证必须独立 | 主对话只剩 `file_info` / `ls` / `read_image` / `job_output`：`ls` 列有哪些名字、`file_info` 验大小与存在性、`read_image` 看图、`job_output` 看后台任务原始输出；全都证明不了「文件里写了什么」。要问内容，只能再派一个人去看 | 自己验自己会互相印证错误；独立验证要求换人 |
 | 汇报必须带证据 | 大脑在派活的 brief 里要求回报四段：结论 / 依据（路径+行号、命令+输出、SHA256 或计数）/ 范围与限制 / 不确定。缺依据的结论，主对话不得转述为事实 | 防止把推测升级成事实汇报给用户 |
 
 派活只有一个入口：`subagent_preset`（由 `blackpig-roster.mjs` 注册），`preset` 参数必填，无默认值。`subagent` / `subagent_fork` 在主对话上被 `extraDeny` 摘掉——因为前者会固定回落到 `agentPreset: "standard"`，后者压根不支持选模式，两条旧路径都会让活派错人且**不报错**。
@@ -177,8 +177,17 @@ preset id 固定是 `blackpigmodel`，不能两个 bundle 各声明一次。会�
 **别用「包目录路径」去 add**（例如 `add file:C:\path\to\dsh-blackpig-mode`），会装成 Junction / 软链，源目录一删一挪就坏。**用 `.tgz` 文件路径或远程 URL 都行。**
 *缺了会怎样*：源目录一删、一挪、一改，装好的模式立刻坏掉，而且报错方式取决于坏在哪一步，很难查。
 
-**7. 本地 `file:` 指向 tgz 装时，要放进 `optionalDependencies`。**
-**如果你用本地 `file:` 指向 tgz 安装**：请把这条依赖放进 `optionalDependencies`，不要放进 `dependencies`。否则那个 tgz 一旦被删除或挪走，`pnpm install` 会整体失败（`ENOENT`，exit `-4058`），**连装别的插件也装不了**。放进 `optionalDependencies` 后，pnpm 只跳过它、其余照装（已实测：tgz 不存在 + 有/无 lockfile、远程 URL 404，三种情形均为 exit 0）。
+**7. 依赖该放 `optionalDependencies` 还是 `dependencies`，取决于安装方式。**
+**如果你用本地 `file:` 指向 tgz 安装**：请把这条依赖放进 `optionalDependencies`，不要放进 `dependencies`。
+否则那个 tgz 一旦被删除或挪走，`pnpm install` 会整体失败（`ENOENT`，exit `-4058`），**连装别的插件也装不了**。
+放进 `optionalDependencies` 后，pnpm 只跳过它、其余照装（已实测：tgz 不存在 + 有/无 lockfile、远程 URL 404，三种情形均为 exit 0）。
+
+**从 GitHub Release URL 正式安装时**：用 `dsh plugin add <URL>`，pnpm 会写进 `dependencies`——
+这是插件页出现「已安装插件」卡片和启用/停用开关的前提。若手工写进 `optionalDependencies`，
+插件页连卡片都不会显示（虽然功能正常）。
+
+> 为什么两种场景结论相反：宿主判定 `installed = dependencies.includes(name)`，**只读 `dependencies`**，
+> `optionalDependencies` 不算。写在后者里 ⇒ 插件页那张卡片和开关**根本不会渲染**。
 
 ---
 
@@ -196,6 +205,7 @@ preset id 固定是 `blackpigmodel`，不能两个 bundle 各声明一次。会�
 | `docs/preset-bench.md` | 基准测试怎么做、结果写哪、怎么隐藏 / 禁用模式 |
 | `subtalk.mjs` | `send_to_subagent` / `stop_subagent`：与已派出的代理继续对话或叫停，冷恢复它自己的上下文 |
 | `file-info.mjs` | `file_info`：只 stat 不读内容，给类型 / 存在性 / 字节数，一次调用可覆盖一组路径 |
+| `ls-tool.mjs` | `ls`：**只列目录下直接条目的名字**（文件 + 子目录，标 `dir`/`file` + 文件字节数），**绝不返回任何文件内容**；不 glob、不递归、不 grep、不读正文；输出硬顶 200 条 / 8 KB，超出截断并报总数；路径不存在 / 不是目录明确报错。见下方「`ls` 能力边界」一节 |
 | ~~`member-persona.mjs`~~ | **已于 v1.0.6 删除（2026-11-12）**：rc.2 下它无任何触发路径（唯一能让子会话继承黑猪 preset 的 `subagent_fork` 已被 `extraDeny` 摘掉；`subagent_preset` 派出的子代理归属别的 preset，被 L279 主动放过）。四段报告格式改由大脑在 brief 里要求 |
 | `package.json` | `dsh.bundle.patch` 声明 + `"exports": { "./*": "./*" }` 子路径映射 |
 | `README.md` | 本文件（不参与字节校验） |
@@ -204,6 +214,19 @@ preset id 固定是 `blackpigmodel`，不能两个 bundle 各声明一次。会�
 | `LICENSE` | MIT 许可证全文 |
 
 逐文件字节数不写在这张表里：包内的 `verify.ps1` 有一份内置参考值表，本表抄一份只会过期。要核对就运行 `verify.ps1`，第 1 项会逐个打印实际字节与参考值的差值——**它只是参考，不会让退出码变红**（要严格判就加 `-StrictSizes`）。
+
+### `ls` 能力边界（2026-11-15 新增）
+
+`ls-tool.mjs` 注册的工具名 `ls` 只补「列名」这一环，**严格不扩大**：
+
+- **只列目录下直接条目的名字**：文件 + 子目录，每条标 `dir`/`file` + 文件字节数（目录记 0）。
+- **绝不返回任何文件内容**：实现只用 `node:fs` 的 `readdirSync(path,{withFileTypes:true})` + `statSync`，没有任何读取正文的调用。
+- **不 glob、不递归、不 grep、不读正文**：`recursive` 参数保留但默认 false，实现上永不递归。
+- **输出硬顶**：最多 200 条 / 8 KB（两者取先到者），超出即截断并报总数（`total` / `shown` / `truncated`）。
+- **参数**：`path`（默认会话 cwd）、`recursive?`。路径不存在 / 不是目录 / 不可读 → 明确抛错，不静默回空表。
+- **排序**：目录在前，其余按名字字母序。
+
+配套流程：**`ls` 列出有哪些名字 → `file_info` 验大小/存在性 → 真需要内容才派代理去读**（要求带行号与原文，不要整篇回灌）。为什么选 `ls` 不选 `read`：`read` 会诱发大脑总去读文件、把过程数据吃进主上下文；`ls` + `file_info` 只给目录项与元数据，形成上面这条「先发现、再核实、最后才读」的闭环。
 
 三个 `[SKIP]` 的理由：`README.md` 随文档改动而变；`check.ps1` / `verify.ps1` 本身会随编辑变化（当前 `.gitattributes` 为 `*.ps1 text eol=lf`，入库与打包的换行符口径都是 LF，不会因换行符变形；但已安装副本可能落后于源码，版本不同也不是字节比对能兜住的）。它们的字节数即使写对也很快过期，所以干脆不参与。
 
@@ -550,7 +573,7 @@ DSH 下一版（master，未发版）把委派控制接口改了两件事，任�
 
 ## English summary
 
-`dsh-blackpig-mode` is an agent preset for DeepSeek Harness (DSH). The coordinator agent holds **no hands-on tools**: no file reads, no shell, no web search or fetch. Its read-only verification surface is `file_info` (file kind, existence, byte count), `read_image`, and `job_output` (raw output of a background job); none of them can read a source file. All actual work is delegated to subagents through a single required-argument tool, `subagent_preset`.
+`dsh-blackpig-mode` is an agent preset for DeepSeek Harness (DSH). The coordinator agent holds **no hands-on tools**: no file reads, no shell, no web search or fetch. Its read-only verification surface is `file_info` (file kind, existence, byte count), `ls` (directory entry names only, never contents), `read_image`, and `job_output` (raw output of a background job); none of them can read a source file. All actual work is delegated to subagents through a single required-argument tool, `subagent_preset`.
 
 ### Origin
 

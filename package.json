@@ -13,6 +13,7 @@
   "files": [
     "cordis.patch.yml",
     "file-info.mjs",
+    "ls-tool.mjs",
     "blackpig-roster.mjs",
     "guard-v10.mjs",
     "compat.mjs",

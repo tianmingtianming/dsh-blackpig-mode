@@ -121,13 +121,14 @@ function Find-PresetDeclaration {
 #
 # 维护者改完源码、重新打包后，应把这里更新为 `npm pack` 产物里的实测值。
 $expected = [ordered]@{
-    'cordis.patch.yml'    = 31632
-    'guard-v10.mjs'       = 196941
+    'cordis.patch.yml'    = 33081
+    'guard-v10.mjs'       = 197431
     'blackpig-roster.mjs' = 36302
     'subtalk.mjs'         = 54964
     'file-info.mjs'       = 31745
+    'ls-tool.mjs'         = 13632
     'compat.mjs'          = 26659
-    'package.json'        = 914
+    'package.json'        = 933
     'README.md'           = 0       # 不参与校验（随文档编辑变化）
     'LICENSE'             = 1073
     'check.ps1'           = 0       # 在 $skipSizeCheck 里，不参与比对（旧值 13564 早已失效）
