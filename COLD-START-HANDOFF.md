@@ -1,5 +1,10 @@
 # 无记忆新对话冷启动接手文档 —— dsh-blackpig-mode
 
+> ⚠️ **本文定稿于 v1.0.4（2026-11-08），此后 8 个版本（1.0.5 → 1.0.10）未再更新。**
+> 文中所有版本号、字节数、文件清单、工具数量、人格段数**均已过期**（例：`package.json` 现为 **1.0.10**；`files[]` 现 16 项；`DEFAULT_KEEP` 现 25 个且已移除 `job_list`/`job_output`/`job_kill`；人格现 18 段 / 9,006 B；`member-persona` 已整体删除；compat 导出 17 个）。
+> **现状一律以源码实测为准**：`package.json` + `cordis.patch.yml` + `guard-v10.mjs` + `verify.ps1`。
+> 本文**仍然有效**的部分：B 节术语三分、D 节两条通道撞名根因、F 节踩坑清单、G 节 rc.1→master 风险、H 节红线。
+
 > **读者**：完全没有本会话记忆、第一次接触本插件的新对话（AI 或人）—— **这是维护者交接手册**。
 > **只想安装使用的读者**：请直接看 `README.md` 的「安装」章节；本文其余部分（开发流程、发布步骤、维护者本机排查记录）可以完全忽略。
 > **目的**：让你在动手之前就建立正确认知，不重复历史上踩过的坑。
@@ -10,7 +15,7 @@
 
 ## 0. 结论先行（先背这十条）
 
-1. 这是发布到 GitHub 的 **DSH agent preset bundle**（npm 包名 `dsh-blackpig-mode`，当前 `package.json` version = **1.0.4**），架构是「**一个大脑 + 队友/子代理**」：大脑只判断、拆任务、派活、汇总；动手（读写 / 跑命令 / 搜索）全部下放。版本历史见文末「版本历史」一节；以 `package.json` 实测为准。
+1. 这是发布到 GitHub 的 **DSH agent preset bundle**（npm 包名 `dsh-blackpig-mode`，当前 `package.json` version = **1.0.4**），架构是「**一个大脑 + 队友/子代理**」：大脑只判断、拆任务、派活、汇总；动手（读写 / 跑命令 / 搜索）全部下放。版本历史见文末「版本历史」一节；以 `package.json` 实测为准。 【v1.0.4 快照，勿当现状】
 2. **唯一权威是 `cordis.patch.yml`**：preset 声明、`persona.prefix`（大脑人格）、`member-persona.text`（队友人格）都在这一个文件里。README 是给人看的说明，不是权威。
 3. **三个词必须精确**：`helper` = 泛指派活对象（队友或子代理）；`subagent` = `subagent_preset` 派出的、跑指定 preset 的一次性代理；`teammate` = `spawn_teammate` 创建的具名常驻成员。历史把 worker/subagent/teammate/helper 混着用，导致大量理解错误。
 4. **收窄只作用于大脑，不作用于队友/子代理——这是设计，不是 bug**：guard 的 `sync()` 对 `isDelegatedChild` 直接 `release()` 早退。
@@ -18,37 +23,37 @@
 6. **团队模式的官方唯一判据是「需不需要共享任务板」**（`packages/team/agent-team/README.md:38,42`），不是「任务大不大 / 跨多少轮」。
 7. **团队工具按产品线分**：本机 rc.1（experimental 包）仍有 `spawn_teammate` + 共 **9 个**团队工具；**master 才删成只剩 4 个 `team_task_*`**、身份层合并进子代理。`compat.mjs` / `blackpig-roster.mjs` 已做跨代兼容，但要用「能力存在性探测」而非版本号判断；master 结论**未生效**，别套到 rc.1。
 8. **绝对红线**：只改本插件自己的 `src\`。绝不碰 `app.asar`、`@deepseek-ai/*`、`~/.dsh/` 下配置、desktop profile 的 `cordis.patch.yml`、`node_modules` 运行副本、任何其他第三方插件。**上次曾把 DSH 弄崩溃过。**
-9. **发布状态**：v1.0.4 已发布到 GitHub（源码与 Release 资产同源），安装后以 `node_modules` 里的运行副本为准。`send_to_subagent` 放开给队友后的三条通路仍待实测；注意 master 的授权放宽会改变其中两条的预期结果（见 D / G 节）。
+9. **发布状态**：v1.0.4 已发布到 GitHub（源码与 Release 资产同源），安装后以 `node_modules` 里的运行副本为准。`send_to_subagent` 放开给队友后的三条通路仍待实测；注意 master 的授权放宽会改变其中两条的预期结果（见 D / G 节）。 【v1.0.4 快照，勿当现状】
 10. 本文档首次落地时只写了文档 + README 一行指针；此后多轮审计已改动 guard-v10 / subtalk / blackpig-roster / member-persona / README 等文件，详见 README 变更记录。
 
 ---
 
 ## A. 这是什么 / 文件清单
 
-`dsh-blackpig-mode` 是一个 **DSH agent preset bundle**，通过 `package.json` 的 `dsh.bundle.patch: "./cordis.patch.yml"` 向 profile 的 Cordis 树插入一行 `preset-blackpigmodel`（preset id = `blackpigmodel`，显示名「黑猪模式」）。`main` 与 `exports["."]` 都指向 `guard-v10.mjs`；`exports["./*"] = "./*"` 让 `dsh-blackpig-mode/xxx.mjs` 子路径能解析到包内（**不能删**）。
+`dsh-blackpig-mode` 是一个 **DSH agent preset bundle**，通过 `package.json` 的 `dsh.bundle.patch: "./cordis.patch.yml"` 向 profile 的 Cordis 树插入一行 `preset-blackpigmodel`（preset id = `blackpigmodel`，显示名「黑猪模式」）。`main` 与 `exports["."]` 都指向 `guard-v10.mjs`；`exports["./*"] = "./*"` 让 `dsh-blackpig-mode/xxx.mjs` 子路径能解析到包内（**不能删**）。 【v1.0.4 快照，勿当现状】
 
-`package.json` 的 `files` 白名单当前 **10 项**：`cordis.patch.yml`、`file-info.mjs`、`blackpig-roster.mjs`、`guard-v10.mjs`、`compat.mjs`、`member-persona.mjs`、`subtalk.mjs`、`check.ps1`、`verify.ps1`、`README.md`。注意 `LICENSE` 未列在 `files` 里，但 npm 会强制包含 `LICENSE*` 与 `README*` 前缀文件（见 I 节）。
+`package.json` 的 `files` 白名单当前 **10 项**：`cordis.patch.yml`、`file-info.mjs`、`blackpig-roster.mjs`、`guard-v10.mjs`、`compat.mjs`、`member-persona.mjs`、`subtalk.mjs`、`check.ps1`、`verify.ps1`、`README.md`。注意 `LICENSE` 未列在 `files` 里，但 npm 会强制包含 `LICENSE*` 与 `README*` 前缀文件（见 I 节）。 【v1.0.4 快照，勿当现状】
 
 逐个文件的职责（以当前源码为准）：
 
 | 文件 | 职责 |
 | --- | --- |
-| `package.json` | 包名/版本（1.0.4）、`main`、`exports` 子路径映射、`files` 打包白名单、`dsh.bundle.patch` 挂载点。 |
-| `cordis.patch.yml` | **唯一权威**。1 个 `- insert:`，`config.plugins:` 下 **25 行顶层插件行**（另有 2 个 `cordis:group`，组内 4 行，共 30 个 `- id:`；其中 2 处 `!!js` 平台判断）。内联 `persona.prefix`（大脑人格）与 `member-persona.text`（队友人格）。还含 `blackpig-guard` 的 `keep: [subagent_preset]` 与 `extraDeny: [subagent, subagent_fork]`。 |
-| `guard-v10.mjs` | 「大脑工具面收窄」守卫：在**大脑自己的 agent scope** 装 `tools.restrict({deny})`（隐藏）+ `tools.guard()`（硬拒执行）。`deny = 可见集 − 保留集`。`DEFAULT_KEEP` 实测 **27** 个名字。`sync()` 对 `isDelegatedChild` 早退 `release()`。另含 `restrict()` 失败保护（先与 `restrictableNames` 求交、try/catch、`guardInstallStatus()` = engaged/degraded/unprotected）。 |
+| `package.json` | 包名/版本（1.0.4）、`main`、`exports` 子路径映射、`files` 打包白名单、`dsh.bundle.patch` 挂载点。 【v1.0.4 快照，勿当现状】 |
+| `cordis.patch.yml` | **唯一权威**。1 个 `- insert:`，`config.plugins:` 下 **25 行顶层插件行**（另有 2 个 `cordis:group`，组内 4 行，共 30 个 `- id:`；其中 2 处 `!!js` 平台判断）。内联 `persona.prefix`（大脑人格）与 `member-persona.text`（队友人格）。还含 `blackpig-guard` 的 `keep: [subagent_preset]` 与 `extraDeny: [subagent, subagent_fork]`。 【v1.0.4 快照，勿当现状】 |
+| `guard-v10.mjs` | 「大脑工具面收窄」守卫：在**大脑自己的 agent scope** 装 `tools.restrict({deny})`（隐藏）+ `tools.guard()`（硬拒执行）。`deny = 可见集 − 保留集`。`DEFAULT_KEEP` 实测 **27** 个名字。`sync()` 对 `isDelegatedChild` 早退 `release()`。另含 `restrict()` 失败保护（先与 `restrictableNames` 求交、try/catch、`guardInstallStatus()` = engaged/degraded/unprotected）。 【v1.0.4 快照，勿当现状】 |
 | `blackpig-roster.mjs` | 注册 **`subagent_preset`**（`TOOL_NAME = 'subagent_preset'`）——大脑**唯一**跨模式派活入口，`preset` 必填、无默认值；支持 `list` / `ask` / `detail` 查模式名册。数据源 `agentPresets.compositionInventory()`。`startActivation` 用「超集入参」`{ request, ...request, ... }` 兼容新旧两代（见 G 节）。 |
 | `subtalk.mjs` | 注册 **`send_to_subagent`** 与 **`stop_subagent`** 两个自造工具（见 D 节）。`send_to_subagent` 对所有 agent 可用；`stop_subagent` 只给大脑，在子会话 scope 上被 `tools.restrict({deny})` 摘掉。发送走 `compat.callSendMessage`，解析走 `compat.resolveTargetId`。默认 `interruptBeforeSend: true`（YAML 配置）。 |
-| `compat.mjs` | 委派控制接口版本兼容层。当前导出：`CONTROL_API_OLD` / `CONTROL_API_NEW` / `UNRESOLVED_TARGET` / `readCatalogVersion` / `detectControlApi` / `targetOf` / `applyToTools` / `resolveTargetId` / `callSendMessage`。**注意：`normalizeAgents` 当前不在源码里**（见文末「附：当前状态速查」）。 |
+| `compat.mjs` | 委派控制接口版本兼容层。当前导出：`CONTROL_API_OLD` / `CONTROL_API_NEW` / `UNRESOLVED_TARGET` / `readCatalogVersion` / `detectControlApi` / `targetOf` / `applyToTools` / `resolveTargetId` / `callSendMessage`。**注意：`normalizeAgents` 当前不在源码里**（见文末「附：当前状态速查」）。 【v1.0.4 快照，勿当现状】 |
 | `member-persona.mjs` | 子会话人格覆盖：在**继承本 preset 的子会话自己的 scope** 上注册同名 `deployment:persona-prefix` 段，盖掉大脑「你不能动手」的人格。判据是 **归属**（`presetId: blackpigmodel`）而非形态，避免把别 preset 的 worker 人格改错；`isDelegatedChild` 判定 fork/种子会话不算子会话。 |
 | `file-info.mjs` | 注册 **`file_info`**：只读元数据工具，`ctx.fs.resolve()+stat()`，一次可查一组路径，报 `status` / `sizeKnown` / `sizeBytes`（大小未知时该键整个缺席，绝不报 0）/ 总 `bytes` 与 `unknownSizes`。`isConcurrencySafe: () => true`。大脑被砍掉 read/grep 后**唯一**的核实手段。 |
-| `check.ps1` | **装前**只读检查（**6 项编号检查**；`-DryRun` 才额外打印装包影响范围，**不编号**，`Report` 编号最大只到 `6/7`，默认不跑），查同名 `blackpigmodel` 声明/残留/`extraDeny` 是否禁了 `subagent_preset` 等。退出码：0 READY / 1 NEEDS-CLEANUP（有残留 / 冲突，先清理）/ 2 BLOCKED（环境不满足，或关键输入读不到、无法判断：无 `dsh.cmd`、profile 目录不存在、`package.json` 读不到，或 `cordis.patch.yml` patch 读不到、未通过 `check.ps1` 的轻量语法健全性检查（tab 缩进 / 引号成对 / 冒号后空格 / 括号配平 / 顶层结构可识别；**不是完整 YAML 解析**））。**装完之后再跑通常仍返回 0（READY）**：第 4 项把「已含包名」判为 INFO（正常升级态），不计入 WARN；**只有另有需要清理的项（例如旧名 `dsh-blackpig-model` 残留）才返回 1（NEEDS-CLEANUP）**。UTF-8 **BOM**。 |
+| `check.ps1` | **装前**只读检查（**6 项编号检查**；`-DryRun` 才额外打印装包影响范围，**不编号**，`Report` 编号最大只到 `6/7`，默认不跑），查同名 `blackpigmodel` 声明/残留/`extraDeny` 是否禁了 `subagent_preset` 等。退出码：0 READY / 1 NEEDS-CLEANUP（有残留 / 冲突，先清理）/ 2 BLOCKED（环境不满足，或关键输入读不到、无法判断：无 `dsh.cmd`、profile 目录不存在、`package.json` 读不到，或 `cordis.patch.yml` patch 读不到、未通过 `check.ps1` 的轻量语法健全性检查（tab 缩进 / 引号成对 / 冒号后空格 / 括号配平 / 顶层结构可识别；**不是完整 YAML 解析**））。**装完之后再跑通常仍返回 0（READY）**：第 4 项把「已含包名」判为 INFO（正常升级态），不计入 WARN；**只有另有需要清理的项（例如旧名 `dsh-blackpig-model` 残留）才返回 1（NEEDS-CLEANUP）**。UTF-8 **BOM**。 【v1.0.4 快照，勿当现状】 |
 | `verify.ps1` | **装后**生效验证（编号 0/5–4/5；无 5/5，结论行不编号）：包落盘（**缺件仍判 FAIL**）+ 内置字节表（**默认只作参考、不计入 exit code**；加 `-StrictSizes` 才按字节判 WARN；`README.md`/`check.ps1`/`verify.ps1` 三个 `[SKIP]`）、`dependencies`/`optionalDependencies` 与 `dsh.profile.bundles` 登记、残留旧声明、`dsh --dump-config` 退出码，及 `preset-blackpigmodel` 命中次数以 **1 + 3/5 已报的残留条数** 为上限：超出上限判 FAIL，落在 1 与上限之间只记 WARN（同一根因不二次判死）。`desktop` profile 用 `%TEMP%` 影子 profile 绕开 `--dump-config` 硬拒。UTF-8 **BOM**。 |
 | `README.md` | 给人看的说明（安装/验证/已知限制/变更记录/致谢），**不是权威**。末尾有一行指向本文档。 |
 | `LICENSE` | MIT 许可证全文（在包内；npm 强制包含）。 |
 
 **两份人格的位置与当前条数**（实测，见文末「附」节）：
-- `persona.prefix`（`cordis.patch.yml` 的 `prefix: |-` 块）= **大脑人格**，英文，12 个非空行 / 11 个以 `**加粗**` 开头的段落（第 1 行是导语、无加粗；**11 是加粗段落数，不是非空行数**），开头 `This session runs in Black Pig mode: you are the brain...`。（2026-11-08 复核：仍是 12 / 11，未增删段落；v1.0.4 只**改写**了其中 `Pick the mode by capability` 那一段，前缀字节 7,289 → 7,719 B。）
-- `member-persona.text`（`cordis.patch.yml` 的 `text: |-` 块）= **队友人格**，英文，23 个非空行 / 9 个加粗段落（其中最后一个 `**Every report must carry these four parts, in this order.**` 就是 4 条编号「报告四段」的标题，那 4 条不另计加粗段），开头 `You are a TEAMMATE on a work team...`。**已不含 `You are a WORKER`**。
+- `persona.prefix`（`cordis.patch.yml` 的 `prefix: |-` 块）= **大脑人格**，英文，12 个非空行 / 11 个以 `**加粗**` 开头的段落（第 1 行是导语、无加粗；**11 是加粗段落数，不是非空行数**），开头 `This session runs in Black Pig mode: you are the brain...`。（2026-11-08 复核：仍是 12 / 11，未增删段落；v1.0.4 只**改写**了其中 `Pick the mode by capability` 那一段，前缀字节 7,289 → 7,719 B。） 【v1.0.4 快照，勿当现状】
+- `member-persona.text`（`cordis.patch.yml` 的 `text: |-` 块）= **队友人格**，英文，23 个非空行 / 9 个加粗段落（其中最后一个 `**Every report must carry these four parts, in this order.**` 就是 4 条编号「报告四段」的标题，那 4 条不另计加粗段），开头 `You are a TEAMMATE on a work team...`。**已不含 `You are a WORKER`**。 【v1.0.4 快照，勿当现状】
 
 ### A.1 人格设计原则（收敛口径，别再逐工具复述）
 
@@ -76,12 +81,12 @@
 > 下面是**实测数字**，不是从配置推出来的理论值。配置面按 `DEFAULT_KEEP` / `extraDeny` 算；实际下发的工具表由宿主在运行时决定（条件注册、平台 `!!js`、团队插件是否开、guard 的 `restrict()` 是否成功都会影响）。
 
 - **大脑（root，`blackpigmodel`）**：
-  - 配置面：`DEFAULT_KEEP` = **27** 个名字（实测：`read_image, working_directory, file_info, send_to_subagent, stop_subagent, subagent, subagent_fork, subagent_preset, spawn_teammate, send_message, list_agents, interrupt_agent, wait_agent, team_task_create, team_task_list, team_task_get, team_task_update, job_list, job_output, job_kill, ask_user_question, todo_write, present, exit_plan_mode, create_goal, get_goal, update_goal`），减去 `extraDeny: [subagent, subagent_fork]` = **25**。`config.keep` 另追加 `subagent_preset`（已在默认表里，重复无害）。
-  - 当前 **DSH 0.2.2-rc.1 实测 24**：宿主因**未进入 plan mode** 把 `exit_plan_mode` 条件摘掉了（`dsh-plan-mode` 是 DSH 内置包，0.2.2 起 `exit_plan_mode` 改成「进 plan mode 才注册」）。**这是官方行为，不是 guard 的问题**（见 F-7）。
-  - 大脑**没有** `read` / `write` / `edit` / `pwsh` / `grep` / `glob` / `web_search` / `web_fetch`；只剩 `file_info` + `read_image` 两类核实手段，且**证明不了文件里写了什么**。
-- **队友**：实测 **64 个工具**，full tool surface（含 `read`/`write`/`edit`/`pwsh` + 团队工具 + `subagent_preset`）。
-- **minimal 子代理**：**35 个**（无 `read`/`write`，只有 `pwsh`/`read_image`/`working_directory` + mnemon/remote 等）。
-- **standard 子代理**：**64 个**。
+  - 配置面：`DEFAULT_KEEP` = **27** 个名字（实测：`read_image, working_directory, file_info, send_to_subagent, stop_subagent, subagent, subagent_fork, subagent_preset, spawn_teammate, send_message, list_agents, interrupt_agent, wait_agent, team_task_create, team_task_list, team_task_get, team_task_update, job_list, job_output, job_kill, ask_user_question, todo_write, present, exit_plan_mode, create_goal, get_goal, update_goal`），减去 `extraDeny: [subagent, subagent_fork]` = **25**。`config.keep` 另追加 `subagent_preset`（已在默认表里，重复无害）。 【v1.0.4 快照，勿当现状】
+  - 当前 **DSH 0.2.2-rc.1 实测 24**：宿主因**未进入 plan mode** 把 `exit_plan_mode` 条件摘掉了（`dsh-plan-mode` 是 DSH 内置包，0.2.2 起 `exit_plan_mode` 改成「进 plan mode 才注册」）。**这是官方行为，不是 guard 的问题**（见 F-7）。 【v1.0.4 快照，勿当现状】
+  - 大脑**没有** `read` / `write` / `edit` / `pwsh` / `grep` / `glob` / `web_search` / `web_fetch`；只剩 `file_info` + `read_image` 两类核实手段，且**证明不了文件里写了什么**。 【v1.0.4 快照，勿当现状】
+- **队友**：实测 **64 个工具**，full tool surface（含 `read`/`write`/`edit`/`pwsh` + 团队工具 + `subagent_preset`）。 【v1.0.4 快照，勿当现状】
+- **minimal 子代理**：**35 个**（无 `read`/`write`，只有 `pwsh`/`read_image`/`working_directory` + mnemon/remote 等）。 【v1.0.4 快照，勿当现状】
+- **standard 子代理**：**64 个**。 【v1.0.4 快照，勿当现状】
 - **关键结论**：**「收窄只作用于大脑，不作用于队友/子代理」是设计，不是 bug**。源码证据：`guard-v10.mjs` 的 `sync()` 里 `if (isDelegatedChild(agent)) { release(agent); return }`（`sync()` 的早退分支）先 `release(agent)` 再 return；`isDelegatedChild()`（函数本体）用 `origin === 'subagent'` / `delegationDepth > 0` / `isSeeded === true → false` / `parentSession` 兜底判定。多处投递层/裁剪层也都有 `isDelegatedChild → return decision`（不裁队友结果）。`DEFAULT_KEEP` 里保留 `subagent`/`subagent_fork` 只是「撤销 `extraDeny` 即自动恢复」的配置开关默认位，**不是大脑能用它们的声明**。注意队友面另有两处结构性摘除（不是收窄），实现见 B 节 teammate 条：`spawn_teammate` 由 guard 的 `TEAMMATE_FORBIDDEN_TOOL` 摘除逻辑摘掉、`stop_subagent` 由 subtalk 的 `hideFromMember`（`requestedDeny`）对 `isDelegatedChild` 摘掉。
 - **P0-3 澄清（guard 注入 / runtime context 抑制态）**：本机 `cordis.patch.yml` 的 persona 行未写 `includeRuntimeContext`（默认 true），当前默认配置**不在抑制态**，故宿主在未抑制态会提前返回、跳过后续过滤，guard 那条「守卫未装」注入实际能进 prompt；但「抑制态下被 requiredContexts 过滤」是条件成立的，日志 + `GUARD_INSTALL_STATUS` 状态表仍是不依赖配置的主通道，P0-3 结论不变。
 
@@ -175,11 +180,11 @@
 ## I. 怎么打包 / 安装 / 回归
 
 - **打包**：`npm pack`（按 `package.json` 的 `files` 白名单）。注意 **npm 对 `README*` / `LICENSE*` 前缀强制包含**。若源码根残留旧的 `.tgz`，一律以 `npm pack` 新产出的那个为准，不要复用旧文件。
-  > **2026-11-08 更新**：`1.1.0.tgz` 是版本号写错的废弃包（包内是旧字节），**未发布、勿用**，已移出并归档。当前有效发布件 = **`dsh-blackpig-mode-1.0.4.tgz`**，其字节数与 sha256 以 GitHub Release `v1.0.4` 页面公布的资产为准（本文不抄具体数字，抄一次就会过期）；`1.0.3.tgz` 保留为上一版。
-- **实测**：`src\` 根下现存的 `README.md.bak-*` 会被 npm 的 `README*` 强制包含规则打进 tgz（不受 `files` 白名单限制）；`COLD-START-HANDOFF.md` 不在 `files`、不会被带入。**重新打包前必须先把源码根所有 `.bak-*` / `_backup-*` 移走或清掉**，否则发布包里混进备份文件。
-- **安装**：用 Desktop 自带 CLI shim：
-  `"%LOCALAPPDATA%\Programs\DeepSeek Harness\resources\runtime\cli\bin\dsh.cmd" plugin --profile <你的profile名> add <tgz>`
-  （GitHub 装法：`... add github:tianmingtianming/dsh-blackpig-mode`；Release：`... add https://github.com/tianmingtianming/dsh-blackpig-mode/releases/download/v1.0.4/dsh-blackpig-mode-1.0.4.tgz`）。**别用包目录路径 add**（会装成 Junction，源目录一挪就坏）；本地 `file:` 指向 tgz 要放进 `optionalDependencies`。
+  > **2026-11-08 更新**：`1.1.0.tgz` 是版本号写错的废弃包（包内是旧字节），**未发布、勿用**，已移出并归档。当前有效发布件 = **`dsh-blackpig-mode-1.0.4.tgz`**，其字节数与 sha256 以 GitHub Release `v1.0.4` 页面公布的资产为准（本文不抄具体数字，抄一次就会过期）；`1.0.3.tgz` 保留为上一版。 【v1.0.4 快照，勿当现状】
+- **实测**：`src\` 根下现存的 `README.md.bak-*` 会被 npm 的 `README*` 强制包含规则打进 tgz（不受 `files` 白名单限制）；`COLD-START-HANDOFF.md` 不在 `files`、不会被带入。**重新打包前必须先把源码根所有 `.bak-*` / `_backup-*` 移走或清掉**，否则发布包里混进备份文件。 【v1.0.4 快照，勿当现状】
+- **安装**：用 Desktop 自带 CLI shim： 【v1.0.4 快照，勿当现状】
+  `"%LOCALAPPDATA%\Programs\DeepSeek Harness\resources\runtime\cli\bin\dsh.cmd" plugin --profile <你的profile名> add <tgz>` 【v1.0.4 快照，勿当现状】
+  （GitHub 装法：`... add github:tianmingtianming/dsh-blackpig-mode`；Release：`... add https://github.com/tianmingtianming/dsh-blackpig-mode/releases/download/v1.0.4/dsh-blackpig-mode-1.0.4.tgz`）。**别用包目录路径 add**（会装成 Junction，源目录一挪就坏）；本地 `file:` 指向 tgz 要放进 `optionalDependencies`。 【v1.0.4 快照，勿当现状】
   - ⚠️ `pnpm add <本地tgz>` 会把 profile 的 `optionalDependencies` 改成本地 `file:` 路径，**发版要改回 GitHub URL**。
 - **装完建议重启一次桌面端以确保生效**（HMR 有时能自动重组，但不要指望；本流程以重启为准。README 侧同步此口径）；`node_modules` 里才是**运行时实际加载**的。
 - **全功能回归清单**（每项的判据是**实际调用记录**，不是「看起来装上了」）：派队友、任务板四件（create/get/list/update）、派代理（`subagent_preset`）、队友派子代理、子代理再派、大脑工具面收窄（实测工具数）、队友人格（开头是 `You are a TEAMMATE`）、复用/冷恢复（同一个 `childSessionId`）、队友 → 直接子代理发消息（`send_to_subagent`）等。每项留 path / 命令 / 输出 / SHA256 或计数。
@@ -188,7 +193,7 @@
 
 ## J. 待办 / 未决
 
-1. ~~当前源码已改完，但尚未重新打包安装~~ —— **已于 2026-11-08 闭环**：已 `npm pack` 出 **1.0.4** 并经「解包读回人格、逐字确认新规则」验证；GitHub 已发 **v1.0.4**；profile 依赖行已切到 v1.0.4 的 Release URL 并装进 `node_modules`。
+1. ~~当前源码已改完，但尚未重新打包安装~~ —— **已于 2026-11-08 闭环**：已 `npm pack` 出 **1.0.4** 并经「解包读回人格、逐字确认新规则」验证；GitHub 已发 **v1.0.4**；profile 依赖行已切到 v1.0.4 的 Release URL 并装进 `node_modules`。 【v1.0.4 快照，勿当现状】
    > **2026-11-08 再修**：`verify.ps1` 的内置字节表已**降级为参考信息**（默认不参与 exit code，见该脚本 `-StrictSizes`）。原因是写死字节对下载者无意义，且每次编辑都要手工同步，忘一次就是假告警。
 2. `send_to_subagent` 放开给队友后的**三条通路待装新版后实测**：① 队友 → 直接子代理；② 队友 → 孙代理；③ 大脑 → 队友派的子代理。**预期结果按版本分**：本机 rc.1 下 ② 应被 `belongs to another parent session` / `authorizeLineage` 拒绝、③ 应够不到（只能等队友转述）；master「同树任意成员互发」下 ②③ 可能直接可达，需复核人格与文案，不能沿用 rc.1 结论。
 3. `compat.mjs` 的 `normalizeAgents` 当前不在源码里；若下版 `list_agents` 返回结构变化要归一化，接手时先核对再补，别假定存在。
@@ -206,6 +211,8 @@
 ---
 
 ## 附：本次接手时的「当前状态」速查（以实际读到的源码为准）
+
+> 【v1.0.4 快照，勿当现状 — 见文件顶部警告】
 
 - **版本基线**：本插件 `package.json` version **1.0.4**；`files` 白名单 10 项；`exports["./*"]="./*"` 在。本文所有「现状」均以此为准。宿主 DSH 版本差异一律在 G 节标「未生效」——以你机器上 `dsh --version` 实测为准，本文不写死宿主版本号。
 - `cordis.patch.yml`：`plugins:` 下 **25 行顶层插件行**（含 2 个 `cordis:group`，组内 4 行；全文件共 30 个 `- id:`，其中 1 个是外层 `- id: preset-blackpigmodel`）；2 处 `!!js`。`keep: [subagent_preset]`、`extraDeny: [subagent, subagent_fork]`。
