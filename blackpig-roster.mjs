@@ -147,10 +147,61 @@ const CAPS_DEFAULTS_RELATIVE = ['defaults', 'preset-caps.json']
 const MODULE_DIR = path.dirname(fileURLToPath(import.meta.url))
 
 /**
+ * v3 新格式必需字段校验（**老格式不兼容**）。
+ *
+ * 顶层：`version === 3`、`scope`、`baseline`、`baselineTools`（数组）。
+ * A 规则（2026-11-20）：每个 preset 必需 `tools` / `toolCount` / `suitableFor` / `notSuitableFor`；
+ * lacks / gains / only / comparisonSummary 已废弃，保留兼容但不校验、不渲染。
+ *
+ * ⚠️ 2026-11-15（v3）：**不回退老格式**。用户明确「老格式现在没人用」；格式不对就是不对，
+ * 直接回 `preset-caps-invalid`，不再把 v1/v2 当成「能凑合读」的数据源。
+ *
+ * @param parsed - 已 JSON.parse 的对象。
+ * @returns `{ ok: true }` 或 `{ ok: false, error }`。
+ */
+function validateV3(parsed) {
+  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    return { ok: false, error: 'the top level is not a JSON object' }
+  }
+  if (parsed.version !== 3) {
+    return { ok: false, error: 'version !== 3 (old format is no longer supported; no fallback)' }
+  }
+  if (typeof parsed.scope !== 'string' || parsed.scope === '') {
+    return { ok: false, error: 'scope is missing or is not a string' }
+  }
+  if (typeof parsed.baseline !== 'string' || parsed.baseline === '') {
+    return { ok: false, error: 'baseline is missing or is not a string' }
+  }
+  if (!Array.isArray(parsed.baselineTools)) {
+    return { ok: false, error: 'baselineTools is missing or is not an array' }
+  }
+  const presets = parsed.presets
+  if (presets === null || typeof presets !== 'object' || Array.isArray(presets)) {
+    return { ok: false, error: 'the presets field is missing or is not an object' }
+  }
+  // A 规则（2026-11-20）：名册只渲染 tools 编号 + suitable/notSuitable，
+  // lacks/gains/only/comparisonSummary 不再使用；放宽为可选以兼容旧格式 defaults 与新格式 local。
+  const required = ['tools', 'toolCount', 'suitableFor', 'notSuitableFor']
+  for (const id of Object.keys(presets)) {
+    const entry = presets[id]
+    if (entry === null || typeof entry !== 'object' || Array.isArray(entry)) {
+      return { ok: false, error: `preset "${id}" is not an object` }
+    }
+    for (const field of required) {
+      if (!(field in entry)) {
+        return { ok: false, error: `preset "${id}" is missing required field "${field}"` }
+      }
+    }
+  }
+  return { ok: true }
+}
+
+/**
  * 读并解析一个候选文件。
  *
- * 不存在 / 读不动 / JSON 坏 / 结构不对都返回 `{ ok: false, reason, error }`，由调用方决定
- * 要不要继续试下一个候选 —— 单个候选失败不是致命错误（用户文件坏了还有包内默认兜着）。
+ * 不存在 / 读不动 / JSON 坏 / **v3 结构不对**都返回 `{ ok: false, reason, error }`。
+ * ⚠️ 候选失败后**不再继续试下一个**：老格式（用户文件写成 v1/v2）必须报
+ * `preset-caps-invalid`，不能被「回退包内默认」静默掩盖 —— 用户明确老格式不兼容。
  *
  * @param filePath - 候选文件的绝对路径。
  * @returns `{ ok: true, caps, source }` 或 `{ ok: false, reason, error }`。
@@ -168,12 +219,9 @@ function readCapsCandidate(filePath) {
   } catch (error) {
     return { ok: false, reason: 'invalid-json', error: error instanceof Error ? error.message : String(error) }
   }
-  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
-    return { ok: false, reason: 'invalid-shape', error: 'the top level is not a JSON object' }
-  }
-  const presets = parsed.presets
-  if (presets === null || typeof presets !== 'object' || Array.isArray(presets)) {
-    return { ok: false, reason: 'invalid-shape', error: 'the presets field is missing or is not an object' }
+  const valid = validateV3(parsed)
+  if (!valid.ok) {
+    return { ok: false, reason: 'preset-caps-invalid', error: valid.error }
   }
   return { ok: true, caps: parsed, source: filePath }
 }
@@ -181,7 +229,11 @@ function readCapsCandidate(filePath) {
 /**
  * 按「用户文件 → 包内默认」的顺序找基准数据。
  *
- * @returns `{ ok: true, caps, source }` 或 `{ ok: false, errors }`（每个候选一条原因）。
+ * ⚠️ 2026-11-15（v3）：用户文件**存在但格式不是 v3**（含 v1/v2 老格式）时**立刻失败**，
+ * 不再继续试包内默认 —— 老格式不兼容，不能被「回退到 4 个内置模式」静默掩盖。
+ * 只有「用户文件不存在 / 读不动 / JSON 坏」才继续试包内默认（那才是「没跑过基准」的场景）。
+ *
+ * @returns `{ ok: true, caps, source }` 或 `{ ok: false, reason, errors }`。
  */
 function loadPresetCaps() {
   const home = typeof os.homedir === 'function' ? os.homedir() : ''
@@ -192,37 +244,109 @@ function loadPresetCaps() {
   for (const candidate of candidates) {
     const read = readCapsCandidate(candidate)
     if (read.ok) return read
+    if (read.reason === 'preset-caps-invalid') {
+      return { ok: false, reason: 'preset-caps-invalid', errors: [candidate + ': ' + read.error] }
+    }
     errors.push(candidate + ': ' + read.error)
   }
-  return { ok: false, errors }
-}
-
-/** 工具数量的展示口径：优先 `toolCount`，否则数 `tools` 数组。 */
-function toolCountOf(entry) {
-  const declared = entry?.toolCount
-  if (typeof declared === 'number' && Number.isFinite(declared) && declared >= 0) return Math.floor(declared)
-  return Array.isArray(entry?.tools) ? entry.tools.length : 0
+  return { ok: false, reason: 'missing', errors }
 }
 
 /** 一行里的空白折成单个空格并去首尾空白（JSON 里的说明可能带换行）。 */
 const oneLine = (text) => String(text).replace(/\s+/g, ' ').trim()
 
 /**
- * 渲染名册 —— **只读 `preset-caps.json`，不查注册表、不做能力推导**。
+ * A 规则编号（2026-11-20）：按 caps.presets 键顺序遍历各模式的 tools 数组，
+ * 工具名首次出现即分配号码（从 1 递增），已发号固定不重排，新工具追加表尾。
+ * 编号不写进 caps 文件，渲染时现场计算；standard 因为是第一个 preset 固定占前段。
  *
- * 输出固定形状（每个模式最多三行），不带任何提示、阶梯说明或未列出的模式：
+ * @param caps - 已通过校验的 caps 对象。
+ * @returns Map<工具名, 序号>（序号从 1 开始）。
+ */
+function computeNumbering(caps) {
+  const map = new Map()
+  const presets = caps?.presets ?? {}
+  for (const id of Object.keys(presets)) {
+    const tools = presets[id]?.tools
+    if (!Array.isArray(tools)) continue
+    for (const raw of tools) {
+      const name = String(raw)
+      if (!map.has(name)) map.set(name, map.size + 1)
+    }
+  }
+  return map
+}
+
+/** 三位补零编号。 */
+const num3 = (n) => String(n).padStart(3, '0')
+
+/** 把一组序号压缩成连续区间字符串：`[001-064]` 或碎段 `[012] [034]`。 */
+function compressRuns(nums) {
+  if (!Array.isArray(nums) || nums.length === 0) return '[]'
+  const sorted = nums.slice().sort((a, b) => a - b)
+  const ranges = []
+  let start = sorted[0], prev = sorted[0]
+  for (let i = 1; i < sorted.length; i++) {
+    if (sorted[i] === prev + 1) prev = sorted[i]
+    else { ranges.push([start, prev]); start = prev = sorted[i] }
+  }
+  ranges.push([start, prev])
+  return ranges.map(([a, b]) => a === b ? `[${num3(a)}]` : `[${num3(a)}-${num3(b)}]`).join(' ')
+}
+
+/**
+ * 渲染全局编号表：按序号升序，`[NNN] 工具名` 逗号平铺，每行约 100 字符折行，绝不截断。
+ * （2026-11-20 排版优化：由「一行一个」改为逗号平铺，省掉约 99 个换行 token。）
  *
- *     Agent modes with a benchmark entry (preset-caps.json) — installed modes missing from this list can still be dispatched if you know their id
+ * @param numbering - computeNumbering() 得到的 Map。
+ * @returns 编号表文本（不含首尾空行）。
+ */
+function renderNumberedTable(numbering) {
+  if (numbering.size === 0) return '  (empty)'
+  const entries = [...numbering.entries()].sort((a, b) => a[1] - b[1])
+  const lines = []
+  let line = ''
+  for (let i = 0; i < entries.length; i++) {
+    const [name, n] = entries[i]
+    const piece = `[${num3(n)}] ${name}` + (i < entries.length - 1 ? ', ' : '')
+    if (line.length + piece.length > 100 && line.trim() !== '') {
+      lines.push(line.replace(/,\s*$/, ','))
+      line = piece
+    } else {
+      line += piece
+    }
+  }
+  if (line.trim() !== '') lines.push(line.replace(/,\s*$/, ','))
+  return lines.join('\n')
+}
+
+/**
+ * 渲染名册（A 规则，2026-11-20）—— **只读 `preset-caps.json`，不查注册表、不做能力推导**。
  *
- *     - standard (33 tools)
+ * 输出形状（无 BASELINE、无 lacks/gains 差集对比）：
+ *
+ *     Tool roster (A numbering: first-seen order across presets; installed modes missing here can still be dispatched if you know their id)
+ *     Global tool index (N tools):
+ *     [001] tool_a
+ *     [002] tool_b
+ *     ...
+ *
+ *     - standard (64 tools): [001-064]
+ *       suitable: …
+ *       not suitable: …
+ *     - minimal (35 tools): [003-005] [015-032] …
  *       suitable: …
  *       not suitable: …
  *
- * `hidden: true` 的模式跳过（只在名册里隐藏，`delegate` 仍可派）；不在 JSON 里的模式
- * **不显示** —— 本模块不再自己推导模式表。自己（`selfId`）也跳过：派给自己会被
- * self-preset 拒，列出来只会误导。
+ * 规则（A 规则）：
+ *   · 编号 = computeNumbering() 现场按 presets 键顺序 + tools 首现顺序分配，standard 固定占前段。
+ *   · 先出全局平铺编号表（renderNumberedTable，`[NNN] 工具名` 逗号平铺、约 100 字符折行，绝不截断）。
+ *   · 每个模式只显示 tools 对应的编号连续段压缩 + suitable/notSuitable 两行；
+ *     不显示 comparisonSummary / only / lacks / gains（旧格式字段被忽略）。
+ *   · `hidden: true` 仍跳过；自己（selfId）跳过。
+ *   · **不设字节上限**（`ROSTER_HARD_CAP_BYTES` 已整体移除，别加回来）。
  *
- * @param caps - 已解析的基准文件（`{ presets: { … } }`）。
+ * @param caps - 已通过校验的 caps 对象。
  * @param selfId - 本模式自己的 preset id。
  * @returns `{ text, degraded }`。
  */
@@ -235,7 +359,14 @@ function renderRoster(caps, selfId) {
     return { text: 'No preset baseline found: preset-caps.json declares no mode.', degraded: [...degraded, 'preset-caps-empty'] }
   }
 
-  const lines = ['Agent modes with a benchmark entry (preset-caps.json) — installed modes missing from this list can still be dispatched if you know their id', '']
+  const lines = ['Tool roster (A numbering: first-seen order across presets; installed modes missing here can still be dispatched if you know their id)', '']
+
+  // ── 全局编号表：A 规则首现编号，逗号平铺约 100 字符折行，绝不截断 ──
+  const numbering = computeNumbering(caps)
+  lines.push(`Global tool index (${numbering.size} tools):`)
+  lines.push(renderNumberedTable(numbering))
+  lines.push('')
+
   let shown = 0
   for (const id of ids) {
     if (id === selfId) continue
@@ -245,8 +376,11 @@ function renderRoster(caps, selfId) {
       continue
     }
     if (entry.hidden === true) continue
-    const count = toolCountOf(entry)
-    lines.push('- ' + id + ' (' + count + (count === 1 ? ' tool)' : ' tools)'))
+    const tools = Array.isArray(entry.tools) ? entry.tools : []
+    const count = typeof entry.toolCount === 'number' ? entry.toolCount : tools.length
+    const nums = tools.map((t) => numbering.get(String(t))).filter((n) => typeof n === 'number')
+    const headline = `- ${id} (${count}${count === 1 ? ' tool' : ' tools'}): ${compressRuns(nums)}`
+    lines.push(headline)
     const suitable = typeof entry.suitableFor === 'string' ? oneLine(entry.suitableFor) : ''
     const notSuitable = typeof entry.notSuitableFor === 'string' ? oneLine(entry.notSuitableFor) : ''
     if (suitable !== '') lines.push('  suitable: ' + suitable)
@@ -649,8 +783,8 @@ export function apply(ctx, config) {
       description:
         'Delegate a self-contained task to a worker running under one specific installed agent mode (preset). ' +
         '`preset` is REQUIRED — there is no default, because the wrong default silently wastes a whole run. ' +
-        'Call with `list: true` FIRST to read the roster: it is rendered from the static preset benchmark ' +
-        '(preset-caps.json) and states, per mode, how many tools it holds and what it is / is not suitable for. ' +
+        'Call with `list: true` FIRST to read the roster: a global numbered tool index plus, per mode, ' +
+        'its tool-number ranges and what it is / is not suitable for (preset-caps.json, A numbering). ' +
         'Pick by that suitability, not by the mode name. ' +
         'The roster only shows modes that were benchmarked. ' +
         'A returned `degraded` field is absent when nothing degraded; `stop: true` means do not retry. ' +
@@ -700,6 +834,23 @@ export function apply(ctx, config) {
         if (args?.list === true) {
           const loaded = loadPresetCaps()
           if (!loaded.ok) {
+            // ⚠️ 2026-11-15（v3）：老格式（v1/v2）不兼容，明确回 preset-caps-invalid，不回退包内默认。
+            if (loaded.reason === 'preset-caps-invalid') {
+              return failure(
+                'preset-caps-invalid',
+                'preset-caps.json is not in the v3 format (old v1/v2 formats are no longer supported; ' +
+                  'there is NO fallback to the package defaults). Details:\n  ' +
+                  loaded.errors.join('\n  ') +
+                  '\n\nRegenerate the file with the v3 benchmark (see the dsh-blackpig-mode settings page prompt ' +
+                  'and docs/preset-bench.md): it needs version:3 / scope / baseline / baselineTools and, per mode, ' +
+                  'tools/toolCount/suitableFor/notSuitableFor. ' +
+                  '`delegate` still works for any mode id you already know.',
+                {
+                  stop: false,
+                  nextAction: 'regenerate ~/.dsh/blackpig-preset-caps.json in v3 format',
+                },
+              )
+            }
             return failure(
               'preset-caps-missing',
               'No preset baseline data found (未找到基准数据). Looked for ' +

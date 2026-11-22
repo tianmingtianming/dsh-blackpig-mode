@@ -246,18 +246,37 @@ v1.0.6 及以前，名册是把「这个模式装载了哪些模块」映射成�
 静态拿不到**（官方原文：a tool schema is not statically knowable）；而且工具集随插件增减而变，
 手维护的映射表必然过期。于是 v1.0.7 改成「跑一次基准测试，把答案存成 JSON，名册读它」。
 
-现在的名册长这样（真机返回，逐字）：
+现在的名册长这样（v3 新格式，真机返回，逐字）。**先出 BASELINE standard 全量工具清单，再给每个模式一句压缩对比句**；`only` 行只在工具数 ≤2 时出现；`lacks` / `gains` 数组不打印（只在 JSON 里用于校验）：
 
 ```text
 Agent modes with a benchmark entry (preset-caps.json) — installed modes missing from this list can still be dispatched if you know their id
 
-- standard (33 tools)
+BASELINE standard (33 tools) — full tool list:
+  ask_user_question, create_goal, edit, get_goal, glob, grep, job_kill, job_list, job_output,
+  list_agents, list_subagent_models, load_workspace_dependencies, plugin_manager, present, pwsh,
+  read, read_image, schedule_create, schedule_edit, schedule_list, schedule_view, send_message,
+  skill, subagent, subagent_fork, todo_write, update_goal, wait_agent, web_fetch, web_search,
+  workflow, working_directory, write
+
+- standard (33 tools): 基准模式，拥有全部 33 个核心工具。
   suitable: 本地代码与文件读写、shell 执行、子代理与工作流编排、插件管理、定时任务、联网取资料。
   not suitable: 没有浏览器 DOM/截图/点击工具，也没有图像生成与多媒体工具，所以不能操作网页界面、不能生成图片、不能做剪辑渲染。
-- ptc (1 tool)
+- ptc (1 tool): 与 standard 无交集；仅有 run_code。
+  only: run_code
   suitable: 写 TypeScript 程序批量编排工具调用，做循环、并发、过滤与聚合，只回传精简结论，适合大批量调用省上下文。
   not suitable: 只有一个 run_code，不能直接逐个调工具，每次都得先写程序；依赖交互审批或人工确认的活干不了。
+- minimal (4 tools): 只保留 4 个核心工具；缺 29 个 standard 专属工具。
+  suitable: 用 shell 在本机排查故障、跑脚本，读取图片，做极简对照测试。
+  not suitable: 没有文件读写与搜索工具，只能靠 shell 命令；不能派子代理、不能联网检索，不适合批量改文件、多代理协作与检索类任务。
+- cordis (35 tools): 保留全部 standard 工具；额外多 2 个 cordis_inspect_*。
+  suitable: 开发调试 DSH 插件与 preset、查看运行时组合树，配合文件与 shell 做端到端验证。
+  not suitable: 缺浏览器 DOM/截图/点击与图像、多媒体工具，不能操作网页界面、不能生成图片、不能做剪辑渲染。
 ```
+
+> ⚠️ **v3 起老格式不兼容**：`preset-caps.json` 必须是 `version:3` 且带 `scope` / `baseline` / `baselineTools`，
+> 每个模式要有 `tools/toolCount/lacks/gains/only/comparisonSummary/suitableFor/notSuitableFor`。
+> 用户覆盖层写成 v1/v2 老格式时 `list: true` 直接回 `preset-caps-invalid`（`stop:false`），**不回退包内默认**，
+> 避免「名册悄悄变成旧的 4 个内置模式」。
 
 **默认只含 4 个内置模式**（`standard` / `ptc` / `minimal` / `cordis`），来自包内
 `defaults/preset-caps.json`（2026-11-14 在 DSH 0.2.2-rc.3 上实跑）。名册**不会自动发现**你装的模式 ——

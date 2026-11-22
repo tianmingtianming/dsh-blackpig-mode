@@ -8,6 +8,14 @@
 > 「这台机器装了哪些模式」改为**派一个 standard worker 读 `cordis.patch.yml`** 拿到 id 清单（见第三节）。
 > 为什么删：①它只服务基准测试，日常只用 `list: true` + `delegate`；②它绕过 hidden 过滤（见 3.4）。
 >
+> **🔴 2026-11-15 名册 v3 新格式**：改为「**BASELINE standard 全量工具清单 + 其余模式压缩对比句**」。
+> `version:3`、`scope`（包内 `generic` / 本机 `local`）、`baseline`、`baselineTools`；
+> 每模式 `tools/toolCount/lacks/gains/only/comparisonSummary/suitableFor/notSuitableFor`。
+> **`lacks/gains/only` 由代码算集合差**，`comparisonSummary` 是一句最短中文；名册只打印
+> `comparisonSummary` + `only`（非空）+ suitable/notSuitable，**不列 lacks/gains 数组**。
+> **老格式（v1/v2）不兼容**：`loadPresetCaps()` 校验必需字段，缺任一个回 `preset-caps-invalid`（`stop:false`），
+> **不回退包内默认**（用户明确「现在没人用老格式」）。设置页提示词（`lib/client.js`）已同步改成生成 v3。
+>
 > 本文取代 1.0.7 之前的旧版本文档。**旧的 `EXTRA:` 行写法已废弃**（v2 起工具清单直接从会话日志取，不再让 worker 自报）。
 
 ---
@@ -19,7 +27,41 @@
 
 本文就是这个流程的操作手册：什么时候要跑、怎么跑、数据从哪取、结果写哪、怎么改、怎么禁。
 
-配套的成品数据见 `docs/preset-caps-v2.json`（v2 草案：4 个模式、33/1/4/35 个核心工具、`lacks`/`gains` 由代码按 baseline 算出）。
+配套的成品数据见 `docs/preset-caps-v2.json`（v2 草案：4 个模式、33/1/4/35 个**核心工具**——这是排除第三方插件的口径，`list: true` 在本机显示的是全量 64/1/35/66，别混用，见 1.1；`lacks`/`gains` 由代码按 baseline 算出）。
+
+### 1.1 两种口径：核心工具数 vs 实测全量工具面
+
+本文件会同时出现两组数字，**它们不是同一个口径，不要混用**：
+
+| 口径 | 数字 | 来源 | 含义 |
+|---|---|---|---|
+| **核心工具数** | standard 33 / ptc 1 / minimal 4 / cordis 35 | 包内 `defaults/preset-caps.json`（3,578 B，剔除版） | **排除第三方插件**后的工具数。这是「装个裸 DSH 就有」的通用工具，机器无关，可作所有人的默认值 |
+| **实测全量工具面** | standard 64 / ptc 1 / minimal 35 / cordis 66 / blender-worker 61 / video-reviewer 53 / davinci-editor 86 / web-agent 74 | 用户覆盖层 `~/.dsh/blackpig-preset-caps.json`（26,119 B，基准测试产出，含第三方插件） | **本机实际能调的全部工具**，含 mnemon / remote / dsh_im / blender 等第三方插件注入的工具 |
+
+**为什么差这么多**：第三方插件在 preset 层注入工具，装了就在内置模式里都带上。本机实测（2026-11-15 覆盖层，逐条比对 `tools` 数组）：
+
+- `mnemon_*` 17 个 / `remote_*` 11 个 / `dsh_im_*` 3 个 = **31 个**，所以 standard / minimal / cordis 三个内置模式每个都比核心多这 31 个（`ptc` 例外：`run_code` 一个，插件工具一个都没注入）。
+- 另外三个插件的工具**只进各自的模式**，不是全局注入：`blender_*` 15 个 → 只进 `blender-worker`；`video_*` 7 个 → 只进 `video-reviewer`；`mcp_*` 37 / 25 个 → 分别进 `davinci-editor` / `web-agent`。所以「多 31 个」只对 standard/minimal/cordis 成立，别拿去套自定义模式。
+
+**该看哪个**：
+
+- 想判断「某个模式在其他机器上大概能干什么」→ 看**核心工具数**（包内 `defaults/` 是这个口径，`scope:"generic"`）
+- 想判断「在**我这台机器上**这个模式现在实际能干什么」→ 看**实测全量**（`~/.dsh/blackpig-preset-caps.json`，`scope:"local"`）
+- `list: true` 本身**不认口径，只认文件**：先读用户覆盖层、读不到才回退包内默认。
+  🔴 **v3 起**：用户覆盖层存在但**格式不是 v3**（含 v1/v2 老格式）→ 直接回 `preset-caps-invalid`，**不回退**包内默认。
+  本机覆盖层里记的是全量，所以现在显示 `BASELINE standard (64 tools)`（包内默认是 `BASELINE standard (33 tools)`）
+- 若把覆盖层换成核心口径的 v3 数据（如直接抄包内 `defaults/`），或覆盖层不存在/读坏回退到包内默认，`list: true` 就显示 33 / 1 / 4 / 35
+- 一句话：**`list: true` 的数字 = 当前那份文件里记的数字**，不是口径的证据；判断口径要看它读的是哪个文件、里面的 `scope` 是 `generic` 还是 `local`
+
+**v3 两份文件的职责（2026-11-15 定）**：
+
+| 文件 | `scope` | 内容 | 谁生成 |
+| --- | --- | --- | --- |
+| `<包>\defaults\preset-caps.json` | `generic` | 4 内置模式的通用核心口径（33/1/4/35），剔除第三方插件 | 发布包自带，维护者改 |
+| `~/.dsh\blackpig-preset-caps.json` | `local` | 本机真实全量工具面（64/1/35/66/61/53/86/74），含插件 | 设置页提示词驱动黑猪跑基准 |
+
+> ⚠️ 本机当前这份 `local` 文件是**由旧 v2 全量文件用代码转换而来**（`tools` 逐字保留、`lacks/gains/only` 由代码算、
+> `comparisonSummary` 用确定性模板），**不是重新派 8 个 worker 跑的**。设置页提示词已改成「以后重跑会生成 v3 格式」。
 
 ---
 
@@ -234,6 +276,8 @@ web-agent
 写进基准文件前要**剔掉**第三方插件的工具（本机实测：`mnemon_*` 17 个 / `remote_*` 11 个 / `dsh_im_*` 3 个，共 31 个），
 只留「装裸 DSH 就有」的核心工具。
 
+> ⚠️ 因此下表**「日志原始条数」那一列是「实测全量工具面」（64/35/1/66），「核心工具条数」那一列才是「核心工具数」（33/4/1/35）**，两者差的就是上面那 31 个插件工具。`list: true` 实际显示的是全量（读用户覆盖层），所以本机会显示 64 而不是 33——见 1.1「两种口径」。
+
 本机 2026-11-14 实测的原始数与剔除后：
 
 | preset | 日志原始条数 | 核心工具条数 | 说明 |
@@ -242,6 +286,8 @@ web-agent
 | minimal | 35 | **4** | 4 核心 + 31 第三方 |
 | ptc | 1 | **1** | `run_code` 一个，无第三方 |
 | cordis | 66 | **35** | 35 核心 + 31 第三方 |
+
+> ⚠️ 左边两列是**日志原文全量**（`request/header.tools[]`，含插件注入），右边一列是**剔除后的核心工具数**。写进包内 `defaults/` 或 `docs/preset-caps-v2.json` 的是核心口径；写进用户覆盖层 `~/.dsh/blackpig-preset-caps.json` 的是全量口径（本机实测就是左列那些数）。两套数字不能混着写进同一个文件，见 1.1。
 
 > `ptc` 的 `run_code` 在程序内部可以再调度别的工具，**但模型侧只看得到 1 个**——基准记录的是「模型侧看到的」，所以是 1。
 
@@ -265,21 +311,30 @@ web-agent
 两者都没有 → `list: true` 明确回 `No preset baseline data found (未找到基准数据)` 并列出试过的路径，
 **不编造模式、不猜能力**。
 
-### 格式（v2）
+> ⚠️ 这两个文件**口径可以不同，名册不做换算**。出厂状态：包内 `defaults/preset-caps.json` 是**核心工具数**（33/1/4/35，机器无关）。
+> 本机现状：用户覆盖层是跑基准得到的**实测全量工具面**（64/1/35/66/61/53/86/74，含插件）。
+> 名册只按「先用户层、后包内」决定**读哪个文件**，不判断里面记的是哪种口径——所以在覆盖层里放核心口径也完全成立（FAQ 里「抄 `preset-caps-v2.json` 进用户文件」就是这么做的，此时 `list: true` 显示 33）。
+> **唯一硬规则：同一份文件里只能有一种口径**（`toolCount` 与 `lacks`/`gains` 必须同源），否则 `lacks` 会和 `tools` 自相矛盾。区别见 1.1。
+
+### 格式（v3，2026-11-15 起；**老 v1/v2 不兼容**）
 
 ```json
 {
-  "version": 2,
-  "testedAt": "2026-11-14",
-  "testedOn": "DSH 0.2.2-rc.3 / desktop profile",
+  "version": 3,
+  "scope": "local",
   "baseline": "standard",
-  "note": "自由文本，不会被解析",
+  "testedAt": "2026-11-15",
+  "testedOn": "DSH 0.2.2-rc.3 / desktop profile",
+  "note": "本机全量口径；lacks/gains/only 由代码按 baselineTools 算。",
+  "baselineTools": ["<standard.tools 全量，字母序>"],
   "presets": {
     "<preset-id>": {
-      "tools": ["kill", "示例"],
-      "toolCount": 33,
-      "lacks": ["相对 baseline 缺的工具"],
-      "gains": ["相对 baseline 多的工具"],
+      "tools": ["字母序"],
+      "toolCount": 64,
+      "lacks": ["baselineTools 有、该模式没有的（代码算）"],
+      "gains": ["该模式有、baselineTools 没有的（代码算）"],
+      "only": ["tools.length <= 2 时填 tools，否则 []"],
+      "comparisonSummary": "一句最短中文，由 worker 按集合结果写",
       "suitableFor": "一句话",
       "notSuitableFor": "一句话",
       "hidden": false
@@ -288,43 +343,56 @@ web-agent
 }
 ```
 
-| 字段 | 必填 | 说明 |
+| 字段 | 必填(v3) | 说明 |
 | --- | --- | --- |
-| `presets` | 是 | 顶层对象，键 = preset id。**键的顺序就是名册里的顺序** |
-| `tools` | 否 | 工具名数组，**必须字母序**；目前只用于算 `toolCount`（名册不逐条打印） |
-| `toolCount` | 否 | 名册括号里的数字；不写就数 `tools` 数组长度 |
-| `lacks` / `gains` | 否 | 相对 `baseline` 的差集。**必须由代码按 `baseline` 算出来，不许手写**（手写必错，见下） |
-| `baseline` | 否 | 算差集用的基准 preset（v2 用 `standard`） |
-| `suitableFor` | 否 | 名册里的 `suitable:` 一行，一句话 |
-| `notSuitableFor` | 否 | 名册里的 `not suitable:` 一行，一句话 |
+| `version` | **是** | 必须 `3`；≠3 直接 `preset-caps-invalid`，不回退 |
+| `scope` | **是** | `generic`（包内默认）/ `local`（本机覆盖层） |
+| `baseline` | **是** | 基准 preset id（用 `standard`） |
+| `baselineTools` | **是** | standard 全量工具清单，BASELINE 段逐条打印（折行不截断） |
+| `presets` | **是** | 顶层对象，键 = preset id；**键的顺序就是名册里的顺序** |
+| `tools` | **是** | 工具名数组，**必须字母序**；与旧 v2 逐字一致（不许增删） |
+| `toolCount` | **是** | 名册括号里的数字；**校验公式** `toolCount == baselineTools.length - lacks.length + gains.length` |
+| `lacks` / `gains` / `only` | **是** | 相对 `baselineTools` 的差集，**必须由代码算，不许手写**；`only` = `tools.length<=2 ? tools : []` |
+| `comparisonSummary` | **是** | 一句最短中文（例「与 standard 无交集；仅有 run_code。」）；名册每模式只打印这句 |
+| `suitableFor` / `notSuitableFor` | **是** | 名册里的两行，一句话 |
 | `hidden` | 否 | `true` = 不在名册里显示（见第八节） |
 
-> 📌 **1.0.7 实际只解析 4 个字段：`tools`（只用来数个数）、`toolCount`、`hidden`、`suitableFor` / `notSuitableFor`。**
-> `version` / `baseline` / `lacks` / `gains` / `testedAt` / `note` **当前不被读取**，写了也不会报错（未知键忽略），
-> 它们的作用是：①给人看（一眼看出这个模式和 standard 差在哪）；②给下个版本预留；
-> ③**反过来当自检钩子**——差集是算出来的，一旦和 `tools` 对不上就说明有人手改坏了。
-> ⇒ 别以为写了 `lacks` 名册就会显示它，1.0.7 不显示。
+> 📌 **v3 的 `loadPresetCaps()` 会逐个校验上述必需字段**：顶层 `version===3` / `scope` / `baseline` / `baselineTools` 数组，
+> 以及每模式的 8 个字段。**缺任一个 = 整份文件无效 → `preset-caps-invalid`（`stop:false`），不回退包内默认**。
+> 这是刻意的：老格式（v1 只有 4 字段、v2 缺 `scope`/`baselineTools`/`only`/`comparisonSummary`）现在没人用，
+> 静默回退会让人误以为「名册还是旧的 4 个内置模式」。
 
-**`lacks` / `gains` 为什么必须用代码算：** 它们纯粹是集合差（`baseline.tools − preset.tools` / `preset.tools − baseline.tools`），
-手写既容易漏又容易和 `tools` 数组自相矛盾；JSON 一旦自相矛盾，名册就会说错话，而表面上完全正常。
-本机核对值：`ptc` lacks=33 / `minimal` lacks=29 / `cordis` gains=2 / `cordis` lacks=0。
+**`lacks` / `gains` / `only` 为什么必须用代码算：** 它们纯粹是集合差
+（`baselineTools − preset.tools` / `preset.tools − baselineTools`）；`only` 是 `tools.length<=2` 的直填。
+手写既容易漏又容易和 `tools` 自相矛盾；JSON 一旦自相矛盾，名册就会说错话，而表面上完全正常。
+**校验公式**：每个模式都要满足 `toolCount == baselineTools.length - lacks.length + gains.length`。
+包内核心口径核对值：`ptc` lacks=33/gains=1/only=[run_code]、`minimal` lacks=29、`cordis` gains=2/lacks=0。
+本机全量口径核对值：`ptc` lacks=64/gains=1、`minimal` lacks=29、`cordis` gains=2/lacks=0。
 
-名册实际渲染的样子（2026-11-15 真机返回，逐字；表头在 2026-11-15 人格修正里改过，旧版是 `Installed agent modes (from preset-caps.json)`）：
+名册实际渲染的样子（**v3 新格式**，2026-11-15 记录，逐字；表头在 2026-11-15 人格修正里改过，旧版是 `Installed agent modes (from preset-caps.json)`）。先出 **BASELINE standard 全量工具清单**（折行、绝不截断），再给每个模式**一句压缩对比句**；`only` 只在工具数 ≤2 出现；`lacks` / `gains` 数组不打印。下例是**包内默认（核心口径 33）**：
 
 ```text
 Agent modes with a benchmark entry (preset-caps.json) — installed modes missing from this list can still be dispatched if you know their id
 
-- standard (33 tools)
+BASELINE standard (33 tools) — full tool list:
+  ask_user_question, create_goal, edit, get_goal, glob, grep, job_kill, job_list, job_output,
+  list_agents, list_subagent_models, load_workspace_dependencies, plugin_manager, present, pwsh,
+  read, read_image, schedule_create, ...（其余全量，折行不截断）
+
+- standard (33 tools): 基准模式，拥有全部 33 个核心工具。
   suitable: ...
   not suitable: ...
-- ptc (1 tool)
+- ptc (1 tool): 与 standard 无交集；仅有 run_code。
+  only: run_code
   suitable: ...
   not suitable: ...
 ```
 
 注意 `ptc (1 tool)` 是**单数**，`standard (33 tools)` 是复数。
-**名册没有任何字节上限**（2026-11-15 起）：写多少条就完整显示多少条，不会被截断、不会加 ` …`、
-也没有 `rosterMaxBytes` 这个配置项了。所以往 `preset-caps.json` 里加模式**不用再考虑预算**。
+
+> ⚠️ 上面这段是**回退到包内默认（核心口径）**时的样子。本机装了 mnemon/remote/dsh_im 后 `list: true` 读的是用户覆盖层（`scope:"local"`），真机会返回 `BASELINE standard (64 tools)` + 8 个模式各一句对比句（`ptc` 仍是 `(1 tool)`）。同一个数字位置、两种口径，见 1.1。
+
+名册**不设字节上限**（`ROSTER_HARD_CAP_BYTES` / `config.rosterMaxBytes` 已于 2026-11-15 整体移除）：全量清单与所有模式原样输出，绝不截断。
 
 ---
 
@@ -335,7 +403,7 @@ Agent modes with a benchmark entry (preset-caps.json) — installed modes missin
 
 两条纪律：
 
-1. **描述里只提核心工具能干什么。** 别写「管记忆柜」「驱动远程会话」「发 IM 文件」——那些是第三方插件的能力，
+1. **描述里只提核心工具能干什么**（按**核心口径**写：剔除插件后 `tools` 里真有什么才写什么；`list: true` 显示的全量数更大，但不能拿来当描述依据，见 1.1）。别写「管记忆柜」「驱动远程会话」「发 IM 文件」——那些是第三方插件的能力，
    剔除后已经不在 `tools` 里了，写进去就是假话。
 2. **不写「更强 / 更聪明 / 更通用」这类空话。** 判断标准必须是工具面：没有 `read/write/edit` 就是不能读写文件；
    没有 `web_fetch/web_search` 就是不能联网；没有浏览器 DOM / 截图 / 点击工具就是不能操作网页界面。
@@ -389,7 +457,7 @@ v1.0.7 因此改成「跑一次、存下来、读文件」。
 
 1. **`ptc` 自报过 1 个，也自报过 60 个。** 同一个模式，两次自述差 60 倍——一次漏到只剩 `run_code`（这次恰好对了），
    一次把程序内部能调度的工具全算成「我能直接调用」。
-2. **`minimal` 自报漏了 `read` / `write`。** 实际上 minimal 根本没有这两个工具（它只有 4 个），
+2. **`minimal` 自报漏了 `read` / `write`。** 实际上 minimal 根本没有这两个工具（核心口径只有 4 个；本机全量是 35 个，多出的 31 个全是插件工具，见 1.1），
    但 worker 在自述里把它们列出来了——因为它「记得」自己用过，而不是「查过」自己有。
 3. **派 minimal 实际落成 standard。** 让一个 `standard` worker 用 `subagent` 去开 minimal worker，
    参数写了 `agentPreset: minimal` 也没用——`subagent` 不接受 preset 参数，落成的还是 standard，
@@ -405,11 +473,11 @@ v1.0.7 因此改成「跑一次、存下来、读文件」。
    只有黑猪（或有 `subagent_preset` 的角色）能跑。见第四节。
 2. **一次派活得两份数据。** 工具清单只能从会话日志取（`request/header.tools[]`），描述只能从 worker 回复取。
    少任何一份都不完整；两件事不能合并成一次自述。
-3. **preset 名不唯一映射工具集。** 实测 `standard`：216 个会话 64 工具、29 个会话只有 4 工具。
+3. **preset 名不唯一映射工具集。** 实测 `standard`：216 个会话 64 工具、29 个会话只有 4 工具（这里的 `64` 指日志原文**全量**，与核心口径的 33 不是同一个数，见 1.1；`4` 是被委派方白名单裁剩下的残余数）。
    根因是**委派方附加的工具白名单**（父会话可以在派活时裁剪子会话的工具），而这份裁剪**不记录在日志的配置字段里**。
    但**黑猪的 `delegate` 不传 `toolFilter`**，所以走黑猪路径时工具集由 preset 唯一决定。
    → 取数时要确认那个会话是黑猪派的，别混进被裁剪过的会话。
-4. **版本漂移。** `standard` 的 64 个工具有两个变体，按时间切开：`interrupt_agent` 版（11-08 ~ 11-11）、
+4. **版本漂移。** `standard` 的 64 个工具（**全量口径**，同样不是核心的 33）有两个变体，按时间切开：`interrupt_agent` 版（11-08 ~ 11-11）、
    `wait_agent` 版（11-12 ~ 11-14）。同一份 JSON 不跨版本通用。
    → **JSON 必须带 DSH 版本号（`testedOn`），升级后重跑。**
 5. **同一会话内工具可能变。** 只有 `blackpigmodel` 中招（4/18 个会话）。
@@ -430,9 +498,13 @@ v1.0.7 因此改成「跑一次、存下来、读文件」。
 **Q：我只用 DSH 自带的 4 个模式，还要跑吗？**
 不用。`docs/preset-caps-v2.json` 就是这 4 个模式的值（2026-11-14 在 DSH 0.2.2-rc.3 上实跑），抄进用户文件即可。
 
+> 注意：这份是**核心口径**（33/1/4/35，剔了插件）。抄进去之后 `list: true` 就显示 33/1/4/35，**不再显示本机的全量数**——因为你把覆盖层换成了核心口径。想同时保留全量，就别覆盖现有覆盖层（见 1.1）。
+
 **Q：装了 blender / mnemon / remote / im，为什么名册里没有它们的工具？**
-因为它们不是「装裸 DSH 就有」的通用工具，会让基准在别人机器上失真。基准只收核心工具（v2 起连 `EXTRA` 行也不要了，
+因为它们不是「装裸 DSH 就有」的通用工具，会让基准在别人机器上失真。基准**包内默认与 `docs/preset-caps-v2.json` 只收核心工具**（v2 起连 `EXTRA` 行也不要了，
 第三方工具就别写进 JSON）。
+
+> 💡 但**本机的用户覆盖层不一样**：这份是「本机实测全量」，`tools` 里本来就含 mnemon/remote/dsh_im 等插件工具（本机 `standard` 是 64 而不是 33）——它只用于「这台机器上现在能干什么」，不用于跨机器对比。两种口径的区别见 1.1。
 
 **Q：名册里没有某个已装模式，是不是装坏了？**
 不是。v1.0.7 起名册**只显示基准文件里有的模式**，不做自动发现。想让它出现 → 跑基准写进用户文件。

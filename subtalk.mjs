@@ -86,9 +86,12 @@
  */
 
 import {
+  DURABLE_CATALOG_SOURCE_DESCENDANTS,
+  DURABLE_CATALOG_SOURCE_QUERY,
   applyToTools,
   callSendMessage,
   detectControlApi,
+  readCallerChildCatalog,
   resolveTargetId,
   targetOf,
 } from './compat.mjs'
@@ -252,7 +255,8 @@ function subagentsOf(ctx) {
  *
  * `running` / `idle` 来自**活 agent 注册表**（`ctx.agents.get(id)`，宿主
  * `dsh-agent` 的公开读方法）；`finished` 来自**已落盘的子会话目录**
- * （`subagents.listChildren(parent)`，宿主 `dsh-subagent` 的公开读方法）；
+ * （v1.0.10 起走 `sessionQuery.subagentCatalog` 投影 / `subagents.listDescendants()`，
+ * 见 compat 的 `readCallerChildCatalog()`；宿主 `listChildren` 在 rc.2 已删除）；
  * `unknown` 表示两处都查不到 —— 可能是 id 写错，也可能会话已被清理。
  *
  * @typedef {'running' | 'idle' | 'finished' | 'unknown'} TargetState
@@ -294,20 +298,18 @@ function liveAgentOf(ctx, id) {
 }
 
 /**
- * 调用方（父）自己的会话 id 候选。
+ * durable 子会话目录的读法标签（写进 `describeTarget().source` 与用户可见文案）。
  *
- * 宿主的 agent id 与会话 id 一般同名，但根会话在目录里出现过 `session-<uuid>`
- * 的形式，所以**两种写法都试**，不假定只有一种。去重后按顺序返回。
+ * v1.0.10：源码里再也**不许**出现 `subagents.listChildren()` 这个说法 ——
+ * 该方法在 DSH v0.2.1-rc.2 已删除，写进回执只会把排查引向不存在的东西。
  *
- * @param sender - 调用方 agent。
- * @returns 非空字符串 id 的数组（可能为空）。
+ * @param source - compat.readCallerChildCatalog() 返回的 source。
+ * @returns 人可读标签。
  */
-function parentSessionIdsOf(sender) {
-  const candidates = new Set()
-  for (const candidate of [sender?.session?.id, sender?.session?.header?.id, sender?.id]) {
-    if (typeof candidate === 'string' && candidate !== '') candidates.add(candidate)
-  }
-  return [...candidates]
+function catalogSourceLabel(source) {
+  if (source === DURABLE_CATALOG_SOURCE_QUERY) return 'sessionQuery.subagentCatalog'
+  if (source === DURABLE_CATALOG_SOURCE_DESCENDANTS) return 'subagents.listDescendants()'
+  return 'durable child catalog (unavailable)'
 }
 
 /**
@@ -317,27 +319,27 @@ function parentSessionIdsOf(sender) {
  * 服务不在、或该 composition 没装 `sessionQuery` 投影时返回 `'unavailable'`，
  * **绝不当成「存在」**。
  *
- * @param sub - subagents 服务。
- * @param parentSessionIds - 调用方（父）会话 id 候选。
+ * ⚠️ v1.0.10 修（缺陷 2，1.0.9 恒返回 unavailable 的连带故障）：
+ * 旧实现用 `sub.listChildren(parentSessionId, signal)` —— 该方法**在
+ * DSH v0.2.1-rc.2 已被删除**（`dsh/docs/upgrade-guide/v0.2.1-rc.2/
+ * subagent-service-methods/guide.zh.md:13`），于是第一行
+ * `typeof sub.listChildren !== 'function'` 直接 return `'unavailable'`，
+ * `isKnownIdProbe()` 恒 false，`describeTarget()` 永远读不到 catalog。
+ * 现在改用 compat 的 `readCallerChildCatalog()`（sessionQuery.subagentCatalog
+ * 主路径 + listDescendants 退路，与 compat 的解析器**同一套**读法）。
+ *
+ * @param ctx - 插件上下文（读 sessionQuery 用）。
+ * @param sub - subagents 服务（退路读名册用）。
+ * @param sender - 调用方 agent。
  * @param targetId - 被查的 id。
  * @param signal - 调用方取消信号。
- * @returns `'present' | 'absent' | 'unavailable'`。
+ * @returns `{ state: 'present'|'absent'|'unavailable', source: string }`。
  */
-async function catalogHas(sub, parentSessionIds, targetId, signal) {
-  if (sub === undefined || sub === null || typeof sub.listChildren !== 'function') return 'unavailable'
-  if (!Array.isArray(parentSessionIds) || parentSessionIds.length === 0) return 'unavailable'
-  let answered = false
-  for (const parentSessionId of parentSessionIds) {
-    try {
-      const rows = await sub.listChildren(parentSessionId, signal)
-      if (!Array.isArray(rows)) continue
-      answered = true
-      if (rows.some((row) => row?.id === targetId)) return 'present'
-    } catch {
-      // 换个候选 id 再试；全都不行才算 unavailable。
-    }
-  }
-  return answered ? 'absent' : 'unavailable'
+async function catalogHas(ctx, sub, sender, targetId, signal) {
+  const catalog = await readCallerChildCatalog(ctx, sub, sender, signal)
+  if (catalog.searched !== true) return { state: 'unavailable', source: 'unavailable' }
+  const present = catalog.rows.some((row) => row.id === targetId)
+  return { state: present ? 'present' : 'absent', source: catalog.source }
 }
 
 /**
@@ -363,24 +365,29 @@ async function describeTarget(ctx, sub, sender, targetId, signal) {
     return targetRow(status === 'running' ? 'running' : 'idle', 'agents.get()', true)
   }
 
-  const catalog = await catalogHas(sub, parentSessionIdsOf(sender), targetId, signal)
-  if (live.kind === 'absent' && catalog === 'present') {
+  const catalog = await catalogHas(ctx, sub, sender, targetId, signal)
+  const catalogState = catalog.state
+  const catalogSource = catalogSourceLabel(catalog.source)
+  if (live.kind === 'absent' && catalogState === 'present') {
     // 活注册表查成了、明确说「没有」，而目录里有 → 这个子会话确实派出去过，但此刻不再活着。
-    return targetRow('finished', 'subagents.listChildren()', true)
+    return targetRow('finished', catalogSource, true)
   }
   if (live.kind === 'unavailable') {
     // ⚠️ 2026-11-07 修（R13）：活注册表**没查成**（`agents` 服务取不到 / 抛错）时，
     // 目录只证明「派出去过、目录里有」，**不证明「已结束」**。旧实现把这一支无条件并入
     // `finished`，于是调用方以为「目标已死无需打断」，而它可能正在运行且从未收到取消请求
     // —— 假成功。这里如实说没查成（looked:false = 没查成），绝不并入 finished。
-    return targetRow('unknown', 'subagents.listChildren()', false, {
-      catalogUnavailable: catalog === 'unavailable',
+    return targetRow('unknown', catalogSource, false, {
+      catalogUnavailable: catalogState === 'unavailable',
     })
   }
   // 活注册表可用且明确说「没有」：活着的代理不可能缺席于注册表。
-  return targetRow('unknown', catalog === 'absent' ? 'agents.get()+listChildren()' : 'agents.get()', true, {
-    catalogUnavailable: catalog === 'unavailable',
-  })
+  return targetRow(
+    'unknown',
+    catalogState === 'absent' ? `agents.get()+${catalogSource}` : 'agents.get()',
+    true,
+    { catalogUnavailable: catalogState === 'unavailable' },
+  )
 }
 
 /**
@@ -638,6 +645,11 @@ export function apply(ctx, config) {
             interruptRequested: { type: 'boolean' },
             interruptVerified: { type: 'boolean' },
             targetState: { type: 'string', enum: ['running', 'idle', 'finished', 'unknown'] },
+            // 2026-11-19（缺陷 1）：目标被解析转换过时，回执正文里的那段说明也作为结构化字段给出，
+            // 便于调用方/测试直接断言（render 只负责把它摊平进文本）。
+            resolvedNote: { type: 'string' },
+            resolvedId: { type: 'string' },
+            resolvedHow: { type: 'string' },
           },
           required: ['ok', 'refused', 'reason', 'interruptRequested', 'interruptVerified', 'targetState'],
         },
@@ -667,6 +679,11 @@ export function apply(ctx, config) {
                 ? `send_to_subagent did NOT deliver anything to ${label} | refused=true | reason=${value?.reason ?? '?'}`
                 : `message accepted into the inbox of subagent ${label}` +
                   ` | messageId=${String((value && value.messageId) ?? '?')}` +
+                  // 2026-11-19（缺陷 1）：目标被前缀/名字解析过时，**必须在正文里显式回显
+                  // 「输入值 → 实际完整 id」**。宿主回执只回显输入值（实测 session-5c60e4d6：
+                  // 传 "0587566b" 时正文写的是 0587566b，看不到解析结果），出了问题无从复核。
+                  // full-id / known-id 直通时不加（`note` 不存在），避免每条回执多一段噪音。
+                  (typeof value?.resolvedNote === 'string' && value.resolvedNote !== '' ? ` | ${value.resolvedNote}` : '') +
                   ` | targetState=${value?.targetState ?? 'unknown'}` +
                   ` | interruptRequested=${value?.interruptRequested === true ? 'true' : 'false'}` +
                   ` | interruptVerified=false (the host issues no interrupt receipt)` +
@@ -776,6 +793,10 @@ export function apply(ctx, config) {
           sub,
           isKnownId,
           logger,
+          // 2026-11-19（缺陷 1）：把「这次是怎么解析出来的」一并交回 compat，让结构化
+          // 结果带上 note —— 回执正文由上面的 render 拼进文本（宿主只回显输入值）。
+          resolvedBy: resolved.how,
+          resolutionNote: resolved.note,
         })
         const messageId = sent?.messageId
         if (sent?.ok === false || typeof messageId !== 'string' || messageId === '') {
@@ -788,6 +809,7 @@ export function apply(ctx, config) {
             interruptRequested,
             interruptVerified: false,
             targetState: target.state,
+            ...(typeof sent?.note === 'string' && sent.note !== '' ? { resolvedNote: sent.note } : {}),
           }
         }
         return {
@@ -799,6 +821,10 @@ export function apply(ctx, config) {
           // 宿主 `interrupt()` 没有返回值、对不存在目标是静默 no-op —— 永远无法验证。
           interruptVerified: false,
           targetState: target.state,
+          // 结构化字段：渲染（render）用 `note` 拼正文，模型/测试也能直接读到解析结论。
+          ...(typeof sent?.note === 'string' && sent.note !== ''
+            ? { resolvedNote: sent.note, resolvedId: sent.targetId, resolvedHow: sent.resolvedBy }
+            : {}),
         }
       },
     })
@@ -935,9 +961,9 @@ export function apply(ctx, config) {
             verified: false,
             outcome: looked ? 'target-not-found' : 'target-not-checkable',
             detail: !looked
-              ? 'neither the live agent registry (agents.get) nor the child catalog (subagents.listChildren) ' +
-                'could be read, so this tool cannot tell whether the target exists — no interrupt was issued ' +
-                'and the outcome is unknown, NOT a success'
+              ? 'neither the live agent registry (agents.get) nor the durable child catalog ' +
+                '(sessionQuery.subagentCatalog / subagents.listDescendants) could be read, so this tool cannot ' +
+                'tell whether the target exists — no interrupt was issued and the outcome is unknown, NOT a success'
               : catalogMachineReadable
                 ? `no live agent has the id "${targetId}" and it is not in your durable child catalog ` +
                   `(looked via ${target.source}), so there is nothing to stop — no interrupt was issued`

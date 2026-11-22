@@ -313,11 +313,6 @@ const DEFAULT_KEEP = [
   'team_task_get',
   'team_task_update',
 
-  // ── 结果回收：后台任务的产出 ──
-  'job_list',
-  'job_output',
-  'job_kill',
-
   // ── 交互与自我管理 ──
   'ask_user_question',
   'todo_write',

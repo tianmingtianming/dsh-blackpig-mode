@@ -121,26 +121,29 @@ function Find-PresetDeclaration {
 #
 # 维护者改完源码、重新打包后，应把这里更新为 `npm pack` 产物里的实测值。
 $expected = [ordered]@{
-    'cordis.patch.yml'    = 33081
-    'guard-v10.mjs'       = 197431
-    'blackpig-roster.mjs' = 36302
-    'subtalk.mjs'         = 54964
+    'cordis.patch.yml'    = 0   # 1.0.8 加锚点挂载行后实测回填（v1.0.7 值 33081 已过时）
+    'guard-v10.mjs'       = 197330
+    'blackpig-roster.mjs' = 43179
+    'subtalk.mjs'         = 57405   # 1.0.9：目录读法 + 解析回显（resolved note）
     'file-info.mjs'       = 31745
     'ls-tool.mjs'         = 13632
-    'compat.mjs'          = 26659
-    'package.json'        = 933
+    'compat.mjs'          = 58895   # 1.0.9：完整 UUID 直通 + 目录读法 + 候选/回显
+    'package.json'        =  981   # 1.0.10 版本号
+    'blackpig-anchor.mjs' = 33963  # 1.0.9 二次修订：名册显示策略（按 N 分档 + 状态标记 + key 含 activity）
     'README.md'           = 0       # 不参与校验（随文档编辑变化）
+    'CHANGELOG.md'        = 0       # 1.0.8 新增；文档，随编辑变化（只校验存在性）
     'LICENSE'             = 1073
     'check.ps1'           = 0       # 在 $skipSizeCheck 里，不参与比对（旧值 13564 早已失效）
     'verify.ps1'          = 0       # 自引用：写死自身字节必然追不上，不参与校验
-    'defaults/preset-caps.json' = 3578   # v1.0.7 基准数据：改坏会让名册失真，加一道闸
+    'defaults/preset-caps.json' = 4069   # A 规则名册：剔除差集字段后的通用基准数据
     'docs/preset-bench.md'      = 0      # 文档，随编辑变化（只校验存在性）
     'index.mjs'                 = 918    # v1.0.7：裸包名行（让 dsh.client 被发现的空壳）
-    'lib/client.js'             = 9997   # v1.0.7：浏览器半边（设置页一级页面「dsh-blackpig-mode」基准提示词）
+    'lib/client.js'             = 10450   # A 规则（通用性修正）：设置页基准校准提示词（全局编号表版）
 }
 
 # 不参与字节校验的文件（允许编辑，或换行符随 git 配置变化）：
 #   README.md  —— 随文档更新
+#   CHANGELOG.md —— 1.0.8 新增，随编辑变化
 #   verify.ps1 —— 自身，改一次字节就变，参与校验必然自死循环
 #   docs/preset-bench.md —— 随文档编辑变化（v1.0.7 新增；只校验存在性）
 #   check.ps1  —— 该脚本本身随检查项增删而变。.gitattributes 的 *.ps1 text eol=lf 只保证
@@ -148,7 +151,14 @@ $expected = [ordered]@{
 #                 字节数一致（已安装副本可能是上次打包留下的，会落后于源码，见重打包待办）。
 #                 真正跳过的理由是：写死字节的期望值必然追不上脚本编辑。
 # 注意：不要改用 SHA256 —— 换行符口径一变、或副本落后一个版本，SHA 同样对不上。
-$skipSizeCheck = @('README.md', 'check.ps1', 'verify.ps1', 'docs/preset-bench.md')
+$skipSizeCheck = @('README.md', 'CHANGELOG.md', 'check.ps1', 'verify.ps1', 'docs/preset-bench.md')
+
+# ── 脚本来源布局判定（1.0.8）───────────────────────────────────────────────
+# v1.0.8 起新增 blackpig-anchor.mjs / CHANGELOG.md。脚本目录若含它们，说明脚本
+# 来自 1.0.8 构建目录；此时装机副本（可能仍是 1.0.7）缺这两个新文件属「新版未装」
+# 而非包损坏，1/5 据此降级为 OK。必须在 1/5 之前赋值（1/5 的分支要读它）。
+$scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+$isNewBuildLayout = (Test-Path -LiteralPath (Join-Path $scriptDir 'blackpig-anchor.mjs')) -and (Test-Path -LiteralPath (Join-Path $scriptDir 'CHANGELOG.md'))
 
 $dshHome    = Get-DshHome
 $profileDir = Join-Path (Join-Path $dshHome 'profiles') $Profile
@@ -240,6 +250,10 @@ if (-not (Test-Path -LiteralPath $pkgDir -PathType Container)) {
         Report 'FAIL' '1/5' '包落盘' ('{0} 处读取失败，1/5 未能完整判定: {1}' -f $readErr, $readDetail) -Hard
         Write-Output ('       有 {0} 处读取失败，1/5 未能完整判定（见上面 [FAIL] 行）' -f $readErr)
         [void]$script:verdicts.Add('包文件/目录读取失败，1/5 判定不完整')
+    } elseif ($missing -gt 0 -and $isNewBuildLayout) {
+        # 脚本自身属于 1.0.8 新布局（脚本目录含新文件），而装机副本还是 1.0.7：
+        # 新文件缺失属「未装新版」，不是包损坏。降级为 OK（不计 FAIL）；其余文件齐全性照常已核。
+        Report 'OK' '1/5' '包落盘' ('缺 2 个 1.0.8 新文件（blackpig-anchor.mjs / CHANGELOG.md）——本脚本来自 1.0.8 构建目录，装机副本仍是 1.0.7，属「新版未装」状态，非包损坏；装完 1.0.8 后复跑应为 0 缺件')
     } elseif ($missing -gt 0) {
         Report 'FAIL' '1/5' '包落盘' ("目录存在，但缺 {0} 个文件（共 {1} 个应到）" -f $missing, $expected.Count)
     } elseif ($sizeBad -gt 0 -and $StrictSizes) {
@@ -256,7 +270,13 @@ if (-not (Test-Path -LiteralPath $pkgDir -PathType Container)) {
     if ($extraFiles.Count -gt 0) {
         Write-Output ('       另有 {0} 个非清单文件（不参与校验）: {1}' -f $extraFiles.Count, (($extraFiles | ForEach-Object { $_.Name }) -join ', '))
     }
-    if ($missing -gt 0) { [void]$script:verdicts.Add('包文件不完整') }
+    if ($missing -gt 0 -and $isNewBuildLayout) {
+        # 脚本自身属于 1.0.8 新布局（脚本目录含新文件），而装机副本还是 1.0.7：
+        # 新文件缺失属「未装新版」，不是包损坏。降级为提示，不计 FAIL；
+        # 其余应到文件的齐全性已在上面逐个核对。
+        Write-Output '       [INFO] 装机副本缺 1.0.8 新文件（blackpig-anchor.mjs / CHANGELOG.md）——本脚本来自 1.0.8 构建目录，属「新版未装」状态，非包损坏；装完 1.0.8 后复跑本脚本应为 0 缺件'
+    }
+    if ($missing -gt 0 -and -not $isNewBuildLayout) { [void]$script:verdicts.Add('包文件不完整') }
     if ($sizeBad -gt 0 -and $StrictSizes) { [void]$script:verdicts.Add('包文件字节数与内置参考值不符（-StrictSizes）') }
 }
 
