@@ -452,6 +452,59 @@ function renderNumberedTable(numbering) {
   return lines.join('\n')
 }
 
+/** 技能编号显示：01–99 补零两位，≥100 用 `s100` 形式。 */
+const skillLabel = (n) => (n < 100 ? String(n).padStart(2, '0') : String(n))
+
+/**
+ * 把技能编号压成 `s[01-07]` / `s[02,04-07]`：连续段合并、散号单列，与工具区间同一套规则。
+ *
+ * @param nums - 该模式的技能编号数组。
+ * @returns `s[…]` 文本。
+ */
+function compressSkillRuns(nums) {
+  if (!Array.isArray(nums) || nums.length === 0) return 's[]'
+  const sorted = [...nums].sort((a, b) => a - b)
+  const ranges = []
+  let start = sorted[0]
+  let prev = sorted[0]
+  for (let i = 1; i < sorted.length; i++) {
+    if (sorted[i] === prev + 1) {
+      prev = sorted[i]
+      continue
+    }
+    ranges.push([start, prev])
+    start = sorted[i]
+    prev = sorted[i]
+  }
+  ranges.push([start, prev])
+  const body = ranges.map(([a, b]) => (a === b ? skillLabel(a) : `${skillLabel(a)}-${skillLabel(b)}`)).join(',')
+  return `s[${body}]`
+}
+
+/**
+ * 渲染技能索引：按编号升序、`[sNN] 名字` 逗号平铺、每行约 100 字符折行，绝不截断。
+ *
+ * @param numbering - 技能编号 Map。
+ * @returns 技能索引文本（不含首尾空行）。
+ */
+function renderSkillTable(numbering) {
+  const entries = [...numbering.entries()].sort((a, b) => a[1] - b[1])
+  const lines = []
+  let line = ''
+  for (let i = 0; i < entries.length; i++) {
+    const [name, n] = entries[i]
+    const piece = `[s${skillLabel(n)}] ${name}` + (i < entries.length - 1 ? ', ' : '')
+    if (line.length + piece.length > 100 && line !== '') {
+      lines.push(line.replace(/,\s*$/, ','))
+      line = piece
+    } else {
+      line += piece
+    }
+  }
+  if (line !== '') lines.push(line.replace(/,\s*$/, ','))
+  return lines.join('\n')
+}
+
 /**
  * 渲染名册（2026-11-24 阶段 4：改为实时派生，静态 caps 只作兜底）。
  *
@@ -498,6 +551,21 @@ function renderRows(rows) {
     '',
   ]
 
+  // 技能编号：rows 顺序 × 每模式技能顺序（skills.list() 返回序），首现发号。
+  const skillRows = rows.filter((row) => row?.live === true && Array.isArray(row.skills))
+  const skillNumber = new Map()
+  for (const row of skillRows) {
+    for (const raw of row.skills) {
+      const name = String(raw)
+      if (!skillNumber.has(name)) skillNumber.set(name, skillNumber.size + 1)
+    }
+  }
+  if (skillNumber.size > 0) {
+    lines.push(`Skill index (${skillNumber.size}):`)
+    lines.push(renderSkillTable(skillNumber))
+    lines.push('')
+  }
+
   for (const row of rows) {
     const tools = Array.isArray(row?.tools) ? row.tools : []
     const nums = tools.map((tool) => numbering.get(String(tool))).filter((n) => typeof n === 'number')
@@ -505,57 +573,11 @@ function renderRows(rows) {
       lines.push(`- ${row.id}: — [unknown]`)
       continue
     }
-    lines.push(`- ${row.id}: ${compressRuns(nums)}${row.live === true ? '' : ' [snapshot]'}`)
-  }
-
-  // 技能：总清单（每个名字一次）+ 按签名分组的 only-in 子句（同签名的模式列表只写一次）。
-  const skillRows = rows.filter((row) => row?.live === true && Array.isArray(row.skills))
-  const allModes = skillRows.map((row) => row.id)
-  const order = []
-  const modesOf = new Map()
-  for (const row of skillRows) {
-    for (const name of row.skills) {
-      if (!modesOf.has(name)) {
-        modesOf.set(name, [])
-        order.push(name)
-      }
-      const modes = modesOf.get(name)
-      if (!modes.includes(row.id)) modes.push(row.id)
-    }
-  }
-  if (order.length > 0) {
-    const total = allModes.length
-    // 签名 = 出现模式集合；全模式签名不产生子句。
-    const groups = new Map()
-    for (const name of order) {
-      const modes = modesOf.get(name)
-      if (modes.length >= total) continue
-      const key = modes.join('\u0000')
-      if (!groups.has(key)) groups.set(key, { modes, names: [] })
-      groups.get(key).names.push(name)
-    }
-    for (const group of groups.values()) group.names.sort()
-    const ordered = [...groups.values()].sort((a, b) => {
-      if (b.modes.length !== a.modes.length) return b.modes.length - a.modes.length
-      if (a.names[0] < b.names[0]) return -1
-      if (a.names[0] > b.names[0]) return 1
-      return 0
-    })
-    const clauses = []
-    for (const group of ordered) {
-      const modes = group.modes
-      const missing = allModes.filter((mode) => !modes.includes(mode)).sort()
-      // 全模式「减去少数」比逐个列出现模式更短时用 all but。
-      const where = missing.length > 0 && missing.length < modes.length
-        ? 'all but ' + missing.join(', ')
-        : modes.join(', ')
-      if (group.names.length === 1) {
-        clauses.push(`${group.names[0]} only in ${where}`)
-      } else {
-        clauses.push(`${group.names.join(', ')} (${group.names.length}) only in ${where}`)
-      }
-    }
-    lines.push(`skills: ${order.length} installed — ${order.join(', ')}${clauses.length > 0 ? '; ' + clauses.join('; ') : ''}`)
+    const skillNums = row.live === true && Array.isArray(row.skills)
+      ? row.skills.map((name) => skillNumber.get(String(name))).filter((n) => typeof n === 'number')
+      : []
+    const skillPart = skillNums.length > 0 ? ` | ${compressSkillRuns(skillNums)}` : ''
+    lines.push(`- ${row.id}: ${compressRuns(nums)}${row.live === true ? '' : ' [snapshot]'}${skillPart}`)
   }
 
   return { text: lines.join('\n'), degraded }
