@@ -6,6 +6,17 @@
 > 只重打 tgz 并覆盖 GitHub Release `v1.0.10` 的资产，不产生 1.0.11。
 > 判断装机版本仍看 `package.json` 的 `version` + 本节日期。
 
+### 2026-11-24 r3（索引命名空间折叠 + P4 人格压缩）
+
+> 同一版本号 `1.0.10` 下原地覆盖；**版本号不 bump**。
+
+- **索引折叠（A）**：`renderRows` 的全局索引把连续同 server 的 `mcp__<server>__<tool>` 折成组头
+  `mcp__<server>__: ` + 组内 `[NNN] <tool>,`（去掉每项重复的 server 前缀）；编号与模式行完全不变。
+  收益：r2 实测规模下索引块 4,395 B → 3,177 B（−1,218 B）；单 server 仅 1 个工具时不折叠。
+- **P4 压缩（C①）**：persona 第 4 段（`**Every brief stands alone.**`）由 1,746 B 压到 **1,594 B**；
+  段数仍 **9**；`based on your findings, fix it` / `Ask for the answer, not the file` / `spend it sparingly`
+  / `DELEGATED_CALLER` / `childSessionId` 全部保留。`cordis.patch.yml` 35,030 B。
+
 ### 2026-11-24 阶段 1–5（人格/描述压缩、`ls` 并入、名册实时派生、段遮蔽）
 
 > 同一版本号 `1.0.10` 下的原地改动；**版本号不 bump**。

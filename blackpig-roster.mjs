@@ -384,8 +384,11 @@ function compressRuns(nums) {
 }
 
 /**
- * 渲染全局编号表：按序号升序，`[NNN] 工具名` 逗号平铺，每行约 100 字符折行，绝不截断。
- * （2026-11-20 排版优化：由「一行一个」改为逗号平铺，省掉约 99 个换行 token。）
+ * 渲染全局编号表：按序号升序、`[NNN] 工具名` 逗号平铺、每行约 100 字符折行、绝不截断。
+ *
+ * 2026-11-24 索引命名空间折叠：`mcp__<server>__<tool>` 的**连续同 server 组**折成
+ * 组头 `mcp__<server>__: ` + 组内 `[NNN] <tool>,`（去掉每项重复的 server 前缀）。
+ * 编号本身不变（仍是首现发号）；单工具 server 不折叠（折叠不省字节）。
  *
  * @param numbering - 编号 Map（renderRows 现场计算）。
  * @returns 编号表文本（不含首尾空行）。
@@ -393,19 +396,59 @@ function compressRuns(nums) {
 function renderNumberedTable(numbering) {
   if (numbering.size === 0) return '  (empty)'
   const entries = [...numbering.entries()].sort((a, b) => a[1] - b[1])
+  const MCP = /^mcp__([A-Za-z0-9_.-]+)__(.+)$/
   const lines = []
   let line = ''
-  for (let i = 0; i < entries.length; i++) {
-    const [name, n] = entries[i]
-    const piece = `[${num3(n)}] ${name}` + (i < entries.length - 1 ? ', ' : '')
-    if (line.length + piece.length > 100 && line.trim() !== '') {
+
+  const pushPiece = (piece) => {
+    if (line === '') {
+      line = piece
+      return
+    }
+    if (line.length + piece.length > 100) {
       lines.push(line.replace(/,\s*$/, ','))
       line = piece
-    } else {
-      line += piece
+      return
     }
+    line += piece
   }
-  if (line.trim() !== '') lines.push(line.replace(/,\s*$/, ','))
+  const flush = () => {
+    if (line.trim() !== '') lines.push(line.replace(/,\s*$/, ','))
+    line = ''
+  }
+
+  let i = 0
+  while (i < entries.length) {
+    const [name, n] = entries[i]
+    const match = MCP.exec(name)
+    if (match === null) {
+      pushPiece(`[${num3(n)}] ${name}, `)
+      i += 1
+      continue
+    }
+    const server = match[1]
+    // 收集「连续同 server」的整段。
+    const items = []
+    let j = i
+    while (j < entries.length) {
+      const next = MCP.exec(entries[j][0])
+      if (next === null || next[1] !== server) break
+      items.push({ tool: next[2], n: entries[j][1] })
+      j += 1
+    }
+    if (items.length < 2) {
+      pushPiece(`[${num3(n)}] ${name}, `)
+      i += 1
+      continue
+    }
+    // 组：flush 当前普通行 → 组头 → 组内工具（续行缩进两格）→ flush。
+    flush()
+    line = `mcp__${server}__: `
+    for (const item of items) pushPiece(`[${num3(item.n)}] ${item.tool}, `)
+    flush()
+    i = j
+  }
+  flush()
   return lines.join('\n')
 }
 
