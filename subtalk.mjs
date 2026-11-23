@@ -594,7 +594,7 @@ export function apply(ctx, config) {
       description:
         'Send a follow-up message to a worker you delegated in this mode with `subagent_preset`. ' +
         'Use the `childSessionId` that delegation returned as `agent_id`. ' +
-        'Available to the coordinator and to any delegating agent: you can message a worker you delegated yourself (its `childSessionId` is its id). You cannot reach workers delegated by someone else, nor grandchildren — the host authorizes only direct parent-to-child. ' +
+        'Available to the coordinator and to any delegating agent: you can message a worker you delegated yourself (its `childSessionId` is its id). You can message any member of your subagent tree (children, grandchildren, the root) as long as sender and target share one tree; a target in another tree is refused. ' +
         'WHAT THE RETURN VALUE PROVES: `messageId` is the host\'s admission receipt — the message is in the ' +
         'child\'s inbox. Nothing here proves the child has STOPPED or READ it. ' +
         'With `interrupt=true` a cancel request is also handed to the host; the host exposes no receipt for that, ' +
@@ -822,14 +822,18 @@ export function apply(ctx, config) {
             // 于是 `targetState=finished` 的回执只剩「accepted into the inbox」一句 ——
             // 模型读不出「这个 worker 早已离开活注册表，这次发送是一次冷恢复」，会误判
             // 没接住并重发，而重发会把这个 brief 第二次跑一遍。
-            // 修法：把「finished 意味着什么」从**中断分支**里解耦出来 —— 它本来就与是否
+            // 修法：把「目标状态意味着什么」从**中断分支**里解耦出来 —— 它本来就与是否
             // 请求中断无关，只由 `target.state` 决定。中断分支的 interruptReason 仍优先。
+            // `unknown` 同样要显式说明：`ok:true` + `messageId` 只证明宿主接纳，
+            // 目标没查成时不能让 render 无条件说「已送达 intended worker」。
             : target.state === 'finished'
               ? 'the target had already ended (absent from the live registry) before this send; ' +
                 'the host restored it and admitted the message, so this was a COLD RESUME of the existing ' +
                 'worker with its whole history — not a failure and not a no-op. Do not resend to confirm: ' +
                 'a second send runs the brief a second time.'
-              : '',
+              : target.state === 'unknown'
+                ? 'the target could not be checked (neither the live agent registry nor the durable child catalog could be read); the host accepted the message, but nothing here proves it reached the intended worker. Do not resend to confirm.'
+                : '',
           interruptRequested,
           // 宿主 `interrupt()` 没有返回值、对不存在目标是静默 no-op —— 永远无法验证。
           interruptVerified: false,

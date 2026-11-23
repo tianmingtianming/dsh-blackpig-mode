@@ -122,12 +122,12 @@ function Find-PresetDeclaration {
 # 维护者改完源码、重新打包后，应把这里更新为 `npm pack` 产物里的实测值。
 $expected = [ordered]@{
     'cordis.patch.yml'    = 0   # 不参与严格字节校验（随编辑变化）
-    'guard-v10.mjs'       = 197307   # 1.0.10 原地覆盖（2026-11-23）：DEFAULT_KEEP 摘掉 working_directory（−23 B）
-    'blackpig-roster.mjs' = 43358   # 1.0.10 第三次覆盖（2026-11-23）：回执文案订正（list_agents 整树可见 / wait_agent 无 target）
-    'subtalk.mjs'         = 58573   # finished 回执补 reason：与 interrupt 无关，只由 target.state 决定
+    'guard-v10.mjs'       = 198239   # teamAvailable 标志物只用 team_task_create（wait_agent 是通用工具，spawn_teammate rc.5 已删）
+    'blackpig-roster.mjs' = 43423   # 派活回执订正：agent_id 也接受 agent 名字 / unambiguous id prefix
+    'subtalk.mjs'         = 59104   # 描述订正：整棵树互发；finished/unknown 回执由 target.state 决定，ok 只证明宿主接纳
     'file-info.mjs'       = 31745
     'ls-tool.mjs'         = 13632
-    'compat.mjs'          = 58889   # 1.0.10 第三次覆盖：注释订正（删掉 noProgress 半句，rc.2 已移除）
+    'compat.mjs'          = 58984   # 报错文案订正：agent_id 接受裸 uuid 与 session-<uuid> 两种完整形态
     'package.json'        =  981   # 1.0.10 版本号
     'blackpig-anchor.mjs' = 33963  # 1.0.9 二次修订：名册显示策略（按 N 分档 + 状态标记 + key 含 activity）
     'README.md'           = 0       # 不参与校验（随文档编辑变化）
@@ -144,6 +144,7 @@ $expected = [ordered]@{
 # 不参与字节校验的文件（允许编辑，或换行符随 git 配置变化）：
 #   README.md  —— 随文档更新
 #   CHANGELOG.md —— 1.0.8 新增，随编辑变化
+#   cordis.patch.yml —— 人格随编辑变化，写死字节必然追不上；人格以段数与逐条断言核对
 #   verify.ps1 —— 自身，改一次字节就变，参与校验必然自死循环
 #   docs/preset-bench.md —— 随文档编辑变化（v1.0.7 新增；只校验存在性）
 #   check.ps1  —— 该脚本本身随检查项增删而变。.gitattributes 的 *.ps1 text eol=lf 只保证
@@ -151,7 +152,7 @@ $expected = [ordered]@{
 #                 字节数一致（已安装副本可能是上次打包留下的，会落后于源码，见重打包待办）。
 #                 真正跳过的理由是：写死字节的期望值必然追不上脚本编辑。
 # 注意：不要改用 SHA256 —— 换行符口径一变、或副本落后一个版本，SHA 同样对不上。
-$skipSizeCheck = @('README.md', 'CHANGELOG.md', 'check.ps1', 'verify.ps1', 'docs/preset-bench.md')
+$skipSizeCheck = @('README.md', 'CHANGELOG.md', 'cordis.patch.yml', 'check.ps1', 'verify.ps1', 'docs/preset-bench.md')
 
 # ── 脚本来源布局判定（1.0.8）───────────────────────────────────────────────
 # v1.0.8 起新增 blackpig-anchor.mjs / CHANGELOG.md。脚本目录若含它们，说明脚本

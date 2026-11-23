@@ -651,7 +651,7 @@ export function apply(ctx, config) {
         childSessionId,
         message:
           `Started a "${presetId}" worker: ${childSessionId}. ` +
-          'Record that id now (into `todo_write`): it is the only handle `send_to_subagent` accepts. ' +
+          'Record that id now (into `todo_write`): `send_to_subagent` takes it as `agent_id`, and also accepts this worker\'s agent name or an unambiguous id prefix. ' +
           'It is a continuable subagent in this tree, not a teammate: `list_agents` lists it as a row named by ' +
           'its path from the root, and a `running` row means it is working now. `wait_agent` takes no target at ' +
           'all — it reports only that input reached your own inbox, never which worker settled. Tell the user ' +

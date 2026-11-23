@@ -428,7 +428,7 @@ export function targetOf(args) {
         '(agent=' + JSON.stringify(fromAgent) + ', agent_id=' + JSON.stringify(fromId) + '). ' +
         'Correct form: keep exactly ONE of them. ' +
         '"agent" must be the agent NAME (a name/path such as "reviewer/checker" — resolve names with list_agents first); ' +
-        '"agent_id" must be the FULL childSessionId (the "session-<uuid>" string returned by subagent_preset). ' +
+        '"agent_id" must be the FULL childSessionId returned by subagent_preset — either the bare "<uuid>" form or the "session-<uuid>" form; both are accepted. ' +
         'These two values address different targets or one of them is malformed: re-check which worker you mean, ' +
         'then resend with only the correct parameter.',
     )
@@ -437,7 +437,7 @@ export function targetOf(args) {
   if (target === undefined) {
     throw new Error(
       'this tool requires a target: pass either "agent" (the agent NAME, new hosts; resolve names with list_agents first) ' +
-        'or "agent_id" (the FULL childSessionId — the "session-<uuid>" string returned by subagent_preset). ' +
+        'or "agent_id" (the FULL childSessionId returned by subagent_preset — the bare "<uuid>" form or the "session-<uuid>" form; both are accepted). ' +
         'Neither was provided, so nothing was sent.',
     )
   }

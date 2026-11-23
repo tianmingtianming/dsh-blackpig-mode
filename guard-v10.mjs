@@ -1575,10 +1575,12 @@ export function apply(ctx, config) {
   /**
    * **团队工具在不在，是运行时才知道的**（2026-10-31 新增，用户选方案 C）。
    *
-   * 背景：`spawn_teammate` / `wait_agent` / `team_task_*` 这 6 个只由
-   * `@deepseek-ai/dsh-experimental-tool-agent-team` 注册。而 `send_message` /
-   * `interrupt_agent` / `list_agents` 三个是**两个包都有**（团队包 + 宿主自带的
-   * `dsh-tool-subagent-control`），所以它们永远在。
+   * 背景：团队工具由 `@deepseek-ai/dsh-experimental-tool-agent-team` 注册；其中
+   * `wait_agent` 也由宿主 `dsh-tool-subagent-control` 无条件提供（rc.5 起），
+   * `spawn_teammate` 在 rc.5 已不存在。而 `send_message` / `interrupt_agent` /
+   * `list_agents` 是**两个包都有**（团队包 + 宿主自带的 `dsh-tool-subagent-control`），
+   * 所以它们永远在。判"本部署有没有团队"只认 `team_task_create`，见下方
+   * `teamAvailable()`；这张清单只用于剪枝/日志，不参与团队能力判定。
    *
    * 问题：`keep` 里写死了这 6 个名字。团队插件一关，它们就不存在了，而
    * `tools.restrict({ deny })` 会拿 `restrictableNames` 校验每个名字 ——
@@ -1625,14 +1627,21 @@ export function apply(ctx, config) {
    * 团队通道当前是否可用。
    *
    * ⚠️ 2026-11-01：判据是**当前可见面**，不是 keep.has()。剪枝改为非破坏性后
-   * keep 里永远有那 6 个名字，用 keep 判定会恒为 true，solo 会话也会说"团队在"。
+   * keep 里永远有那几个名字，用 keep 判定会恒为 true，solo 会话也会说"团队在"。
+   *
+   * ⚠️ 2026-11-23 修（B4）：标志物只用 `team_task_create` 一个 —— 它是团队能力
+   * 唯一稳定的标志：`wait_agent` 由宿主 `dsh-tool-subagent-control` 无条件注册
+   * （rc.5 起本部署 preset 也显式挂载），`spawn_teammate` 在 rc.5 已不存在，
+   * 两者都不能代表"本部署有没有团队"。用整张清单求 any 会让 solo 部署因一个
+   * 通用工具恒判为有团队 → teamMode 恒真 → solo 分支文案永远不可达。
+   * 标志物只认 team_task_create；团队能力一旦装上它就出现，卸载就消失，
+   * 换部署/换版本仍成立，不需要维护名字清单。
    */
+  const TEAM_CAPABILITY_MARKER = 'team_task_create'
   const teamAvailable = (visibleNow) => {
     if (visibleNow === undefined || visibleNow === null) return false
-    for (const name of TEAM_ONLY_TOOLS) {
-      if (visibleNow.has?.(name) || (Array.isArray(visibleNow) && visibleNow.includes(name))) return true
-    }
-    return false
+    return visibleNow.has?.(TEAM_CAPABILITY_MARKER) ||
+      (Array.isArray(visibleNow) && visibleNow.includes(TEAM_CAPABILITY_MARKER))
   }
 
   // 额外摘除：配置里点名的工具，即使出现在保留集里也要拿掉。
@@ -2058,7 +2067,7 @@ export function apply(ctx, config) {
           ? null
           : nowVisible.filter((name) => restrictableNow.has(name) && !isCoordinatorTool(name))
         if (leaked !== null && leaked.length === 0) {
-          // ⚠️ 2026-11-01：提前返回前必须刷新 teamOn。团队 6 个都在 keep 里，
+          // ⚠️ 2026-11-01：提前返回前必须刷新 teamOn。团队工具都在 keep 里，
           // 晚注册时 leaked 仍为 0 → 若在这里 return，teamOn 会冻结成 solo，
           // 文案说「没有队友」而工具其实都在（逆向误导，无任何报错）。
           teamOn.set(agent, teamAvailable(new Set(nowVisible)))

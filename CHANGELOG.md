@@ -6,6 +6,32 @@
 > 只重打 tgz 并覆盖 GitHub Release `v1.0.10` 的资产，不产生 1.0.11。
 > 判断装机版本仍看 `package.json` 的 `version` + 本节日期。
 
+### 2026-11-23 最终修订（9 段人格 + 四处回执/判据订正 + preset-bench 通用化）
+
+**人格精简**：`cordis.patch.yml` 的 `persona.prefix` 由 17 段合并为 **9 段**——同类断言归段
+（身份/只读、唯一出口/第三方、按能力选模式、brief/报告/产物、复用/finished、启动/批量、
+钱与困惑、路径被堵/工具失败委派、参数/树边界），删去宿主已声明与不影响行为的冗词，
+所有关键断言逐条保留。`timeout backstop` / 具体分钟数等瞬时判据一律不在人格内。
+段落判据只认「段数 = 9」与逐条断言，不认任何字节数当现状。
+
+**四处订正**（都按通用契约，不写本机值）：
+- `guard-v10.mjs` 的 `teamAvailable()` 只认 `team_task_create` 一个团队能力标志物——
+  `wait_agent` 由宿主无条件注册、`spawn_teammate` 在 rc.5 已不存在，用整张清单求 any
+  会让无团队部署误判成 teamMode 恒真、solo 文案不可达。
+- `subtalk.mjs` 的 `send_to_subagent` 描述改为「同树任意成员互发」；回执 reason 增
+  `finished`（COLD RESUME）与 `unknown`（目标未查成）两支——`ok:true` + `messageId`
+  只证明宿主接纳，不证明到达预期 worker，绝不重发确认。
+- `blackpig-roster.mjs` 派活回执改为：`send_to_subagent` 收 `agent_id`，也收 agent 名字
+  或 unambiguous id prefix（不写死前缀长度阈值，判据在 `compat.mjs` 常量里）。
+- `compat.mjs` 的 `targetOf()` 报错改为完整 childSessionId 的裸 `<uuid>` 与
+  `session-<uuid>` 两种形态都接受（与文件内已有判据一致）。
+
+**preset-bench 通用化**：包内 `docs/preset-bench.md` 换用去掉本机瞬时值的新版；
+`README.md` 的 `preset-caps.json` 描述不再写死字节数。
+
+**打包/校验**：`tools\build-blackpig-tgz.mjs` 打带 `package/` 前缀的 tgz，
+`verify-entry-files.mjs` 判入口落盘；`verify.ps1` 期望表同步所有改动文件字节。
+
 ### 2026-11-23 修订（C-1 人格 + 摘 `working_directory`）
 
 **修订 1：人格 18 段 → 17 段（`cordis.patch.yml`）**
@@ -15,9 +41,9 @@
 - **P18「有状态任务保持模式」并入 P09「默认复用」**：两段讲的是同一件事的两半
   （复用已有 worker / 别中途换模式），分成两段反而让「什么时候该换」和「换了会怎样」
   拆在两个地方。合并后仍在同一段里，判据一条不少。
-- 实测口径（同一台机器、同一量法）：人格正文 **18 段 / 9,258 B → 17 段 / 8,348 B**
-  （字符口径 9,200 → 8,292）；`cordis.patch.yml` **35,420 → 34,748 B**（−672）。
-  段落从 L70 起、正文 L70–L102、L103 空行、L104 起 `- id: agent-instructions`。
+- 当轮实测（历史值，之后的精简见本文件「最终修订」节）：人格正文 **18 段 → 17 段**；
+  `cordis.patch.yml` 该轮由 35,420 B 降至 34,748 B（−672）。段落从 L70 起、正文至 L102、
+  L103 空行、L104 起 `- id: agent-instructions`。
 - 判据（新措辞必须在、旧措辞必须不在）：`timeout backstop` 全程 **0 命中**；
   `stateful or interactive` **1 命中**（并入 P09 后仍保留该句）。
 

@@ -370,7 +370,7 @@ BASELINE standard (33 tools) — full tool list:
 
 这一版只动名册与查询，**派活逻辑一行未改**（`delegate()` 原样保留，含它自己的活校验）。
 
-- **新增 `defaults/preset-caps.json`**（3,578 B）：内置 4 个模式（standard / ptc / minimal / cordis）的工具数
+- **新增 `defaults/preset-caps.json`**：内置 4 个模式（standard / ptc / minimal / cordis）的工具数
   与「适合 / 不适合」说明。名册的回退数据源。
 - **新增 `docs/preset-bench.md`**：基准测试怎么跑（一段可复制 prompt）、结果写哪、怎么隐藏 / 禁用模式。
 - **`list: true` 改为「只读 JSON，不查注册表」**：渲染 4 行/模式以内，输出约 600–900 B
