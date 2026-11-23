@@ -816,7 +816,20 @@ export function apply(ctx, config) {
           ok: true,
           messageId: String(messageId),
           refused: false,
-          reason: interruptReason,
+          reason: interruptReason !== ''
+            ? interruptReason
+            // 实测缺陷：`interrupt` 为 false 或省略时不发中断，`interruptReason` 恒为空，
+            // 于是 `targetState=finished` 的回执只剩「accepted into the inbox」一句 ——
+            // 模型读不出「这个 worker 早已离开活注册表，这次发送是一次冷恢复」，会误判
+            // 没接住并重发，而重发会把这个 brief 第二次跑一遍。
+            // 修法：把「finished 意味着什么」从**中断分支**里解耦出来 —— 它本来就与是否
+            // 请求中断无关，只由 `target.state` 决定。中断分支的 interruptReason 仍优先。
+            : target.state === 'finished'
+              ? 'the target had already ended (absent from the live registry) before this send; ' +
+                'the host restored it and admitted the message, so this was a COLD RESUME of the existing ' +
+                'worker with its whole history — not a failure and not a no-op. Do not resend to confirm: ' +
+                'a second send runs the brief a second time.'
+              : '',
           interruptRequested,
           // 宿主 `interrupt()` 没有返回值、对不存在目标是静默 no-op —— 永远无法验证。
           interruptVerified: false,

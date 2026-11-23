@@ -121,10 +121,10 @@ function Find-PresetDeclaration {
 #
 # 维护者改完源码、重新打包后，应把这里更新为 `npm pack` 产物里的实测值。
 $expected = [ordered]@{
-    'cordis.patch.yml'    = 0   # 1.0.8 加锚点挂载行后实测回填（v1.0.7 值 33081 已过时）
+    'cordis.patch.yml'    = 0   # 不参与严格字节校验（随编辑变化）
     'guard-v10.mjs'       = 197307   # 1.0.10 原地覆盖（2026-11-23）：DEFAULT_KEEP 摘掉 working_directory（−23 B）
     'blackpig-roster.mjs' = 43358   # 1.0.10 第三次覆盖（2026-11-23）：回执文案订正（list_agents 整树可见 / wait_agent 无 target）
-    'subtalk.mjs'         = 57439   # 1.0.10 第三次覆盖：回执文案订正（不再声称 wait_agent 看同伴）
+    'subtalk.mjs'         = 58573   # finished 回执补 reason：与 interrupt 无关，只由 target.state 决定
     'file-info.mjs'       = 31745
     'ls-tool.mjs'         = 13632
     'compat.mjs'          = 58889   # 1.0.10 第三次覆盖：注释订正（删掉 noProgress 半句，rc.2 已移除）
