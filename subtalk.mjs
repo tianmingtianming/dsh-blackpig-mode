@@ -1006,8 +1006,8 @@ export function apply(ctx, config) {
           outcome: 'request-sent-unverified',
           detail:
             'the cancel request was handed to the host; it issues no receipt, so whether the child has ' +
-            'observed the signal is unverified — this result is the only evidence you get. This worker is NOT a ' +
-            'Team member: `list_agents` never sees it; `wait_agent` reports on teammates only, so its result says nothing about this worker. ' +
+            'observed the signal is unverified — this result is the only evidence you get. This worker is a ' +
+            'continuable subagent, not a teammate: `list_agents` lists it, and `wait_agent` watches only your own inbox, so its result says nothing about this worker\'s progress. ' +
             'Do not confirm its state with them. Judge it from a `send_to_subagent` reply (`targetState`) or from the ' +
             'host\'s completion notice.',
         }

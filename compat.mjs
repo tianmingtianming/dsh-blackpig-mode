@@ -19,8 +19,8 @@
  *     send_message / interrupt_agent 入参 = agent（名字，走 ctx.subagents.resolveName()）
  *     list_agents 入参 {}，总是列整棵树
  *     返回项 { name, status, description } —— 没有 id、没有 kind
- *     wait_agent 工具（timeout_ms 10000–3600000，默认 30000，输出 { timedOut } |
- *       noProgress{ reason, message }（无活跃队友时立即返回））
+ *     wait_agent 工具（timeout_ms 10000–3600000，默认 30000，输出 { timedOut }；
+ *       rc.2 起官方移除 noProgress；本机 rc.5 无此返回）
  *     SUBAGENT_CATALOG_VERSION = 3（v3 加了 name）
  *
  * 注意：上面两代 list_agents 的返回项只是宿主事实；本模块不消费这些返回行，

@@ -652,8 +652,10 @@ export function apply(ctx, config) {
         message:
           `Started a "${presetId}" worker: ${childSessionId}. ` +
           'Record that id now (into `todo_write`): it is the only handle `send_to_subagent` accepts. ' +
-          'This worker is NOT a Team member: `list_agents` never sees it and `wait_agent` returns noProgress ' +
-          'immediately for it, so never wait on it. Tell the user what you dispatched, ' +
+          'It is a continuable subagent in this tree, not a teammate: `list_agents` lists it as a row named by ' +
+          'its path from the root, and a `running` row means it is working now. `wait_agent` takes no target at ' +
+          'all — it reports only that input reached your own inbox, never which worker settled. Tell the user ' +
+          'what you dispatched, ' +
           'then either end your turn (its completion notice will wake you) or do independent work ' +
           'that touches different files.',
         evidence: {

@@ -123,11 +123,11 @@ function Find-PresetDeclaration {
 $expected = [ordered]@{
     'cordis.patch.yml'    = 0   # 1.0.8 加锚点挂载行后实测回填（v1.0.7 值 33081 已过时）
     'guard-v10.mjs'       = 197307   # 1.0.10 原地覆盖（2026-11-23）：DEFAULT_KEEP 摘掉 working_directory（−23 B）
-    'blackpig-roster.mjs' = 43179
-    'subtalk.mjs'         = 57405   # 1.0.9：目录读法 + 解析回显（resolved note）
+    'blackpig-roster.mjs' = 43358   # 1.0.10 第三次覆盖（2026-11-23）：回执文案订正（list_agents 整树可见 / wait_agent 无 target）
+    'subtalk.mjs'         = 57439   # 1.0.10 第三次覆盖：回执文案订正（不再声称 wait_agent 看同伴）
     'file-info.mjs'       = 31745
     'ls-tool.mjs'         = 13632
-    'compat.mjs'          = 58895   # 1.0.9：完整 UUID 直通 + 目录读法 + 候选/回显
+    'compat.mjs'          = 58889   # 1.0.10 第三次覆盖：注释订正（删掉 noProgress 半句，rc.2 已移除）
     'package.json'        =  981   # 1.0.10 版本号
     'blackpig-anchor.mjs' = 33963  # 1.0.9 二次修订：名册显示策略（按 N 分档 + 状态标记 + key 含 activity）
     'README.md'           = 0       # 不参与校验（随文档编辑变化）
