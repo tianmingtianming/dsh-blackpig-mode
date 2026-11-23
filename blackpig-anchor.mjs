@@ -708,24 +708,3 @@ export function apply(ctx, _config) {
   )
 }
 
-/**
- * 诊断出口：当前状态表快照（深拷贝，调用方改不坏内部记录）。
- *
- * 供 `node -e` 探针与排查使用（与 guard 的 guardInstallStatus 同一取向）。
- *
- * @returns {object} { [sessionId]: AnchorState }。
- */
-export function anchorDebugState() {
-  const snapshot = {}
-  for (const [key, state] of STATES) {
-    snapshot[key] = {
-      lastAnchorBucket: state.lastAnchorBucket,
-      anchorCursor: state.anchorCursor,
-      window: state.window === null ? null : { ...state.window },
-      stepsSeen: state.stepsSeen,
-      catalogKey: state.catalogKey,
-      catalogBroken: state.catalogBroken,
-    }
-  }
-  return snapshot
-}

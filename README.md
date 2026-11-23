@@ -193,7 +193,7 @@ preset id 固定是 `blackpigmodel`，不能两个 bundle 各声明一次。会�
 
 ## 文件说明
 
-14 个条目（v1.0.7 新增 `defaults/preset-caps.json` 与 `docs/preset-bench.md`），一句话一个（其中三个不参与字节校验，见下）：
+17 个文件（含 `defaults/`、`docs/` 两个子目录条目；r5 删掉了 `lib/client.js`），一句话一个（其中三个不参与字节校验，见下）：
 
 | 文件 | 作用 |
 | --- | --- |
@@ -202,7 +202,7 @@ preset id 固定是 `blackpigmodel`，不能两个 bundle 各声明一次。会�
 | `compat.mjs` | **委派控制接口兼容层**：`detectControlApi` / `callSendMessage` / `resolveTargetId` / `applyToTools`。旧宿主的 `agent_id` 与新宿主的 `agent`（名字）在这里归一化，调用点不再各判一遍版本 |
 | `blackpig-roster.mjs` | `subagent_preset` 工具 + 代理名册：`list: true` **优先从活注册表派生**（`agentPresets.acquireScope` + `tools.view` + `skills.list`），接口缺失才回退 `preset-caps.json` 快照；派活走活的注册表校验 |
 | `defaults/preset-caps.json` | 内置的 4 个 DSH 模式基准数据，**名册的兜底快照**（实时派生不可用时使用） |
-| `docs/preset-bench.md` | 基准测试怎么做、结果写哪、怎么隐藏 / 禁用模式 |
+| `docs/preset-bench.md` | caps 格式契约与运维（兜底语义、改描述、禁用模式） |
 | `subtalk.mjs` | `send_to_subagent` / `stop_subagent`：与已派出的代理继续对话或叫停，冷恢复它自己的上下文 |
 | `file-info.mjs` | `file_info`：只 stat 不读内容，给类型 / 存在性 / 字节数；`list: true` + `path` 时列目录直接子条目（200 条 / 8 KB 硬顶、不递归），已取代原 `ls` |
 | `section-mute.mjs` | 在 preset scope 注册**空文本段**，遮蔽全局 `harness:source` / `app:web-surface` 两个 prompt 段（空文本段被宿主渲染丢弃）；任何异常只记日志、不影响启动 |
@@ -251,64 +251,26 @@ Tool roster (A numbering: first-seen order across presets; installed modes missi
 Global tool index (N tools):
 [001] ask_user_question, [002] create_goal, …
 
-- standard: [001-049]
-- ptc: [050]
-- davinci-editor: [003-006] … [060-099]
-skills: 12 installed — blackpig-search, office; office only in standard
+Skill index (12):
+[s01] blackpig-search, [s02] office, …
+
+- standard: [001-049] | s[01-02]
+- ptc: [050] | s[02]
+- davinci-editor: [003-006] … [060-099] | s[02]
 ```
 
 规则：
 
-- 编号 = registry 顺序 × 每个模式自己的工具顺序，首现发号、三位补零，绝不截断。
-- 每模式只列编号区间：**不再有 `(N tools)` 计数，也不再有 suitable / not suitable 两行**。
-- 技能合并成一行；`<skill> only in <模式>` 只列「不是所有 live 模式都持有」的技能。
+- 工具编号 = registry 顺序 × 每个模式工具顺序，首现发号、三位补零，绝不截断。
+- 技能单独编号（`s01`…）= 模式顺序 × 每模式 `skills.list()` 顺序；模式行按模式给技能区间（`| s[…]`）。
+- 每模式只列编号区间：**不再有 `(N tools)` 计数、`suitable:` 两行、`skills:` 行及其 `only in` 子句**。
 - 单模式取不到（`broken` 或 `acquireScope` 抛错）时**仍保留该行**：能用 `preset-caps.json` 回填就回填并标
   ` [snapshot]`；caps 里也没有该模式则写 `- <id>: — [unknown]`（不许吞行）。
 
 > 兜底：接口缺失时整份名册走静态 `preset-caps.json`（v3：用户文件优先、回退包内 `defaults/`），
 > 每行带 ` [snapshot]`。v1/v2 老格式仍直接回 `preset-caps-invalid`，不回退包内默认。
 
-#### 设置页里的「dsh-blackpig-mode」基准测试页面（v1.0.7，2026-11-15）
 
-跑基准测试需要一整段提示词。以前它只躺在本文档里，要自己复制；现在**设置页里有独立页面**：
-
-**设置 → dsh-blackpig-mode** → 右上「复制提示词」→ 直接粘给黑猪。
-
-- 页面正文就是 `docs/preset-bench.md` 里那段提示词的全文（保留换行）。
-- 它**只做展示与复制**，不读也不改任何配置；删掉 `cordis.patch.yml` 末尾的 `blackpig-client` 行即可移除。
-- 为什么不是「插件 → 内置插件配置」：那个分组只收 `plugins.item` 注册项。本包改注册 `settings.section`
-  （设置导航里的一级页面，与 dsh-multitask 同一座位），因此**不再出现在插件页任何分组里**。
-- 为什么不用 `plugins.bundle.config`：它只在组合包详情页内渲染，而本包在插件页**根本列不出来** ——
-  宿主 `listed` 过滤要求 `installed` / `official` / `error` 三者之一，本包写在 `optionalDependencies` 里
-  所以 `installed=false` 且无 error。挂了也点不到。
-
-### 想知道「这台机器到底装了哪些模式」→ 派 worker 读配置
-
-名册答不了这个问题（它只显示基准文件里有的模式）。**v1.0.7 第三轮（2026-11-14）已移除 `list: { all: true }`**，
-改用下面这条路 —— 黑猪自己没有 `read` / `grep`，但**它可以派一个有这些工具的 worker 去读 `cordis.patch.yml`**：
-
-```text
-派一个 standard 模式的 worker，让它读 <DSH_HOME>/profiles/<profile>/cordis.patch.yml，
-找所有 name 为 "@deepseek-ai/dsh-agent-preset" 的声明行，取各自 config.id，
-加上 4 个内置（standard/ptc/minimal/cordis），报回完整 id 列表。
-注意外层实例名（如 preset-blender-worker）不是真正的 id，真正的 id 在 config.id 里。
-```
-
-黑猪（depth 0）派 worker ⇒ worker 是 depth 1，远低于本项目 `maxDepth: 2`，不占额外层级。
-
-**为什么删掉 `list: { all: true }`**（1.0.7 第二轮加、第三轮删），两条理由：
-
-1. **只服务基准测试，日常无用。** 日常只有 `list: true`（读 `preset-caps.json`）和 `delegate` 两个动作。
-2. **它绕过 `hidden` 过滤。** `renderRoster()`（`blackpig-roster.mjs:342-386`）有两道过滤 ——
-   `:364` 跳过自己、`:370` 跳过 `hidden: true`；而 `renderAllPresetIds()`（原 `:416-445`，已删除）
-   **完全不读 `preset-caps.json`、不判断 hidden**。留着它等于开一条「名册藏起来、`all: true` 却能列出来」的后门，
-   而且 hidden 模式、自己、不在 caps.json 的、broken 的四类 id 全漏。
-
-现在 `list` 参数是**纯 boolean**，传对象会被宿主 schema 直接拒绝。基准测试怎么拿 id 清单，见包内
-**`docs/preset-bench.md`** 第三节（有现成 prompt 模板）。
-
-**自定义模式要自己跑一次基准测试**，把结果写进 `~/.dsh/blackpig-preset-caps.json`（用户文件优先于包内默认）。
-怎么跑、返回格式、字段含义，见包内 **`docs/preset-bench.md`**，那里有一段可以直接复制的 prompt。
 
 三件事分清楚：
 

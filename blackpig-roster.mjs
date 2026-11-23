@@ -6,7 +6,7 @@
  * 与 standard 都不同，活派给 standard 就干不了，白烧一轮且不报错。
  * 根因不是模型懒，是「不传也能成功」。所以本模块把「用哪个模式」变成必填参数。
  *
- * 名册数据源：**`preset-caps.json`（静态基准文件）**，不再在运行时从宿主动态推导。
+ * 名册 live 优先（`agentPresets.acquireScope`）；静态 `preset-caps.json` 仅作兜底。
  *
  *   ① 用户文件优先：`~/.dsh/blackpig-preset-caps.json`
  *   ② 回退包内默认：`<包目录>/defaults/preset-caps.json`
@@ -810,9 +810,7 @@ export function apply(ctx, config) {
     // 原设计有两层人工边界（`allowedPresets` / `deniedPresets`），都已删除：
     //   · 白名单让「装新模式」必须回来改黑猪配置，模式不可通用；
     //   · 黑名单是白名单的补丁，同样是替运维记「哪些模式可以派」。
-    // 现在：名册只列 `preset-caps.json` 里有的模式，选人是「这份基准说明覆盖不覆盖」的问题；
-    // 没基准的模式不显示但仍可派（delegate 走活校验）。危险模式靠基准文件的
-    // suitableFor / notSuitableFor 文字和工具清单暴露，不再有能力标签。
+    // 现在：名册只展示 live（或兜底 caps）里的模式；没显示的模式仍可派（delegate 走活校验）。
     //
     // ⚠️ 2026-11-02（第二轮复核 P2-2）：存在性校验抽成了 `presetUnusable()`，
     //    统一处理「不存在 / broken / self」三道前置，任何派活路径都先过它。
@@ -1014,15 +1012,7 @@ export function apply(ctx, config) {
             description: 'A short (3-5 word) label for display.',
           },
           list: {
-            // 2026-11-14 第三轮：`list: { all: true }` 已移除，参数回到纯 boolean。
-            //
-            // 为什么删（两条理由都经代码核查）：
-            //   ① 只服务基准测试，日常无用 —— 黑猪日常只需 `list: true`（读 preset-caps.json）+ `delegate`；
-            //   ② 它绕过 hidden 过滤 —— `renderAllPresetIds()` 完全不读 `preset-caps.json`、不判 hidden，
-            //      而 `renderRows()` 有两道过滤（跳过 self、跳过 `hidden: true`）。留着 `all: true`
-            //      等于开一条「名册不显示、但能列出来」的后门。
-            // 替代：基准测试第 1 步改成「派一个 standard worker 读 cordis.patch.yml 列 preset id」
-            // （depth 仍为 2，不超 maxDepth；worker 有 read/grep），见 docs/preset-bench.md 第三节。
+            // `list` 是纯 boolean：`{ all: true }` 分支已于 2026-11-14 移除（只服务旧基准流程，且绕过 hidden 过滤）。
             type: 'boolean',
             description:
               '`true` returns the roster — a global numbered tool index plus per-mode tool-number ranges, ' +
@@ -1078,13 +1068,12 @@ export function apply(ctx, config) {
                 'preset-caps.json is not in the v3 format (old v1/v2 formats are no longer supported; ' +
                   'there is NO fallback to the package defaults). Details:\n  ' +
                   loaded.errors.join('\n  ') +
-                  '\n\nRegenerate the file with the v3 benchmark (see the dsh-blackpig-mode settings page prompt ' +
-                  'and docs/preset-bench.md): it needs version:3 / scope / baseline / baselineTools and, per mode, ' +
-                  'tools/toolCount/suitableFor/notSuitableFor. ' +
+                  '\n\nFix or rewrite the file (v3 format: docs/preset-bench.md); it needs version:3 / scope / ' +
+                  'baseline / baselineTools and, per mode, tools/toolCount/suitableFor/notSuitableFor. ' +
                   '`delegate` still works for any mode id you already know.',
                 {
                   stop: false,
-                  nextAction: 'regenerate ~/.dsh/blackpig-preset-caps.json in v3 format',
+                  nextAction: 'fix ~/.dsh/blackpig-preset-caps.json (v3 format)',
                 },
               )
             }
@@ -1093,12 +1082,12 @@ export function apply(ctx, config) {
               'No preset baseline data found (未找到基准数据). Looked for ' +
                 '~/.dsh/blackpig-preset-caps.json and <package>/defaults/preset-caps.json:\n  ' +
                 loaded.errors.join('\n  ') +
-                '\n\nRun the preset benchmark once and write the result to ~/.dsh/blackpig-preset-caps.json ' +
-                '(see docs/preset-bench.md). Until then the roster cannot be rendered; `delegate` still works ' +
+                '\n\nWrite the file by hand (v3 format: docs/preset-bench.md) at ~/.dsh/blackpig-preset-caps.json. ' +
+                'Until then the roster cannot be rendered; `delegate` still works ' +
                 'for any mode id you already know.',
               {
                 stop: false,
-                nextAction: 'create ~/.dsh/blackpig-preset-caps.json (see docs/preset-bench.md)',
+                nextAction: 'create ~/.dsh/blackpig-preset-caps.json (v3 format: docs/preset-bench.md)',
               },
             )
           }
@@ -1110,15 +1099,7 @@ export function apply(ctx, config) {
           }
         }
 
-        // ── 2026-11-14 第三轮：`list: { all: true }` 分支已整体移除 ──────────────
-        //
-        // 原来这里有一段「`args.list` 是对象且 `all === true` → 走 registry.list() 只回 id」
-        // 的逻辑（外加 `all: false` 回落名册的兼容分支）。两条理由删掉它：
-        //   ① 只服务基准测试，日常只用 `list: true` + `delegate`；
-        //   ② 它绕过 hidden 过滤（`renderAllPresetIds()` 不读 preset-caps.json、不判 hidden，
-        //      而 `renderRows()` 会跳过 self 与 `hidden: true`）。
-        // Schema 也已回到纯 boolean，所以对象形态会被宿主直接拒绝，不需要在代码里兜。
-        // 基准测试要「有哪些 id」改为派 worker 读 cordis.patch.yml（见 docs/preset-bench.md）。
+        // `list: { all: true }` 分支已整体移除；需要模式清单直接 `list: true`（Schema 只接受 boolean）。
 
         return delegate(args, exec)
       },

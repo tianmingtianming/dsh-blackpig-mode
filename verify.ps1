@@ -123,22 +123,21 @@ function Find-PresetDeclaration {
 $expected = [ordered]@{
     'cordis.patch.yml'    = 0   # 不参与严格字节校验（人格随编辑变化；5/5 用段数+needle 断言）
     'guard-v10.mjs'       = 198122   # 2026-11-24：DEFAULT_KEEP 去掉 'ls'（并入 file_info）
-    'blackpig-roster.mjs' = 50617   # 2026-11-24 r4：技能编号（Skill index + 模式行 | s[…]）
+    'blackpig-roster.mjs' = 48842   # 2026-11-24 r4：技能编号（Skill index + 模式行 | s[…]）
     'subtalk.mjs'         = 58608   # 2026-11-24：描述压缩（send/stop）
     'file-info.mjs'       = 40069   # 2026-11-24：并入 ls（list: true，200 条/8KB，不递归）
     'section-mute.mjs'    = 2537    # 2026-11-24 新增：空文本段遮蔽 harness:source / app:web-surface
-    'compat.mjs'          = 58905   # 2026-11-24：applyToTools 的 agent 描述压缩
-    'package.json'        =  986   # 1.0.10（未 bump）：files[] 删 ls-tool、加 section-mute
-    'blackpig-anchor.mjs' = 33963  # 1.0.9 二次修订：名册显示策略（按 N 分档 + 状态标记 + key 含 activity）
-    'README.md'           = 65743   # 记录值；仍在 skipSizeCheck（随文档编辑变化）
+    'compat.mjs'          = 57441   # 2026-11-24：applyToTools 的 agent 描述压缩
+    'package.json'        =  863   # 1.0.10（未 bump）：files[] 删 ls-tool、加 section-mute
+    'blackpig-anchor.mjs' = 33296  # 1.0.9 二次修订：名册显示策略（按 N 分档 + 状态标记 + key 含 activity）
+    'README.md'           = 62647   # 记录值；仍在 skipSizeCheck（随文档编辑变化）
     'CHANGELOG.md'        = 20561   # 记录值；仍在 skipSizeCheck（随文档编辑变化）
     'LICENSE'             = 1073
     'check.ps1'           = 0       # 在 $skipSizeCheck 里，不参与比对
     'verify.ps1'          = 0       # 自引用：写死自身字节必然追不上，不参与校验
     'defaults/preset-caps.json' = 4069   # 兜底快照（live 名册不可用时）
-    'docs/preset-bench.md'      = 0      # 文档，随编辑变化（只校验存在性）
-    'index.mjs'                 = 918    # v1.0.7：裸包名行（让 dsh.client 被发现的空壳）
-    'lib/client.js'             = 10450   # A 规则（通用性修正）：设置页基准校准提示词（全局编号表版）
+    'docs/preset-bench.md'      = 22204  # 文档，随编辑变化（只校验存在性）
+    'index.mjs'                 = 180    # 最小根入口：apply 空实现（宿主侧无行为）
 }
 
 # 不参与字节校验的文件（允许编辑，或换行符随 git 配置变化）：

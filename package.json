@@ -7,8 +7,7 @@
   "main": "./index.mjs",
   "exports": {
     ".": "./index.mjs",
-    "./*": "./*",
-    "./client": "./lib/client.js"
+    "./*": "./*"
   },
   "files": [
     "cordis.patch.yml",
@@ -24,17 +23,12 @@
     "README.md",
     "CHANGELOG.md",
     "defaults/preset-caps.json",
-    "docs/preset-bench.md",
     "index.mjs",
-    "lib/client.js"
+    "docs/preset-bench.md"
   ],
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"
-    },
-    "client": {
-      "platform": "web",
-      "inject": []
     }
   },
   "keywords": [

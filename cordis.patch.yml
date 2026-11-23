@@ -397,14 +397,3 @@
           config:
             enabled: true
             interruptBeforeSend: true
-    # ── 2026-11-15：让浏览器半边被发现（插件页的「基准测试提示词」卡片）──
-    #
-    # 本条**没有宿主行为**（index.mjs 的 apply 是空的）。它存在的唯一原因：
-    # 宿主的客户端发现（@deepseek-ai/dsh-client-modules 的 exactPackageSpecifier）
-    # 只认**裸包名**行 —— specifier 里带 `/` 一律返回 undefined，不参与 dsh.client
-    # 扫描。本包其余行都是子路径（dsh-blackpig-mode/blackpig-roster.mjs 等），
-    # 所以 lib/client.js 一直进不了 window.__DSH_BOOT__。
-    #
-    # 删掉本条 = 插件页那张卡片消失；黑猪本体（名册/守卫/subtalk）不受影响。
-    - id: blackpig-client
-      name: "dsh-blackpig-mode"

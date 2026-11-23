@@ -102,36 +102,6 @@ export function isFullChildSessionId(target) {
 export const DURABLE_CATALOG_SOURCE_QUERY = 'sessionQuery.subagentCatalog'
 export const DURABLE_CATALOG_SOURCE_DESCENDANTS = 'subagents.listDescendants()'
 
-/**
- * 从一次调用的入参里找出「看起来是 childId 前缀」的原始值（v1.0.8）。
- *
- * ⚠️ 2026-11-19：本函数当前**无调用方**——`resolveTargetId` 的前缀容错直接吃
- * 解析层拿到的 target 字符串（`looksLikeIdPrefix`），不需要再从 args 剥壳。
- * 保留导出仅为可测试性；若下个版本仍无调用方，按本包「删死代码比留注释可靠」
- * 的惯例整段删除。
- *
- * 只做形状识别，不做解析——解析必须走权威的目录/注册表（见 `resolveTargetId`）。
- * 识别范围：`agent` / `agent_id` 任一位置的字符串，剥掉引号/反引号/空白/
- * `childSessionId=` 之类的修饰后，长度 ≥ 8 且不含空白，即视为候选。
- *
- * @param args - 工具入参。
- * @returns {string|undefined} 剥壳后的候选前缀；没有像 id 的值时 undefined。
- */
-export function idPrefixCandidateOf(args) {
-  for (const key of ['agent_id', 'agent']) {
-    const raw = args?.[key]
-    if (typeof raw !== 'string') continue
-    // 剥掉常见修饰：引号/反引号、前后空白、"childSessionId="/"id=" 前缀、首尾省略号。
-    const stripped = raw
-      .trim()
-      .replace(/^[`"']+|[`"']+$/g, '')
-      .replace(/^(?:childSessionId|childId|id)\s*[:=]\s*/i, '')
-      .replace(/\.{2,}|…$/g, '')
-      .trim()
-    if (stripped.length >= ID_PREFIX_MIN_LENGTH && !/\s/.test(stripped)) return stripped
-  }
-  return undefined
-}
 // 上一函数按「保留导出仅为可测试性」的注释维持；当前无调用方。
 
 
