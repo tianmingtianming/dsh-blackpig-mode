@@ -628,3 +628,4 @@ Built with heavy reference to **`dsh-multitask@1.2.25`**, a **third-party commun
 
 MIT，见 [LICENSE](LICENSE)。5 个 `.mjs` 插件与人格文本来自作者的本地 DSH 部署，随包原样分发。
 > 无记忆接手本插件：仓库根有 `COLD-START-HANDOFF.md`（**不在 npm 包内**，只在 GitHub 仓库里）；装包后请到仓库查看。
+> ⚠️ 该交接文档定稿于 **v1.0.4（2026-11-08）**，其版本号/字节数/工具数量等「当前状态」数字**已过期**，仅架构、术语、红线、rc.1→master 风险部分仍有效；现状以源码实测为准。
