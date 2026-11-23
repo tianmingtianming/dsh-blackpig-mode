@@ -1,7 +1,7 @@
 # 模式能力基准测试（preset benchmark）
 
 > 适用：`dsh-blackpig-mode` **1.0.7 及以后**。名册（`subagent_preset({ list: true })`）不查宿主注册表、不做能力推导，
-> 只读一份静态基准文件 `preset-caps.json`（用户覆盖层优先，回退包内 `defaults/`）。
+> **v1.0.10 起**：名册**优先从活注册表派生**（`agentPresets.acquireScope` + `tools.view` + `skills.list`）；静态 `preset-caps.json` 退化为**兜底快照**——只在接口缺失（老宿主）、单模式取不到、或整体读不到时使用。下面的基准流程仍适用于兜底数据。
 > 包内自带 4 个内置模式的默认值；自定义模式、或内置模式的工具面变了，都得自己跑一次。
 >
 > **1.0.7 第三轮（2026-11-14 起）已移除 `list: { all: true }`**：`list` 参数回到纯 boolean。

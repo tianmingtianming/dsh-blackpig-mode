@@ -121,21 +121,21 @@ function Find-PresetDeclaration {
 #
 # 维护者改完源码、重新打包后，应把这里更新为 `npm pack` 产物里的实测值。
 $expected = [ordered]@{
-    'cordis.patch.yml'    = 0   # 不参与严格字节校验（随编辑变化）
-    'guard-v10.mjs'       = 198239   # teamAvailable 标志物只用 team_task_create（wait_agent 是通用工具，spawn_teammate rc.5 已删）
-    'blackpig-roster.mjs' = 43423   # 派活回执订正：agent_id 也接受 agent 名字 / unambiguous id prefix
-    'subtalk.mjs'         = 59104   # 描述订正：整棵树互发；finished/unknown 回执由 target.state 决定，ok 只证明宿主接纳
-    'file-info.mjs'       = 31745
-    'ls-tool.mjs'         = 13632
-    'compat.mjs'          = 58984   # 报错文案订正：agent_id 接受裸 uuid 与 session-<uuid> 两种完整形态
-    'package.json'        =  981   # 1.0.10 版本号
+    'cordis.patch.yml'    = 0   # 不参与严格字节校验（人格随编辑变化；5/5 用段数+needle 断言）
+    'guard-v10.mjs'       = 198122   # 2026-11-24：DEFAULT_KEEP 去掉 'ls'（并入 file_info）
+    'blackpig-roster.mjs' = 47759   # 2026-11-24：名册实时派生（acquireScope + tools.view + skills.list）
+    'subtalk.mjs'         = 58608   # 2026-11-24：描述压缩（send/stop）
+    'file-info.mjs'       = 40069   # 2026-11-24：并入 ls（list: true，200 条/8KB，不递归）
+    'section-mute.mjs'    = 2537    # 2026-11-24 新增：空文本段遮蔽 harness:source / app:web-surface
+    'compat.mjs'          = 58905   # 2026-11-24：applyToTools 的 agent 描述压缩
+    'package.json'        =  986   # 1.0.10（未 bump）：files[] 删 ls-tool、加 section-mute
     'blackpig-anchor.mjs' = 33963  # 1.0.9 二次修订：名册显示策略（按 N 分档 + 状态标记 + key 含 activity）
-    'README.md'           = 0       # 不参与校验（随文档编辑变化）
-    'CHANGELOG.md'        = 0       # 1.0.8 新增；文档，随编辑变化（只校验存在性）
+    'README.md'           = 65743   # 记录值；仍在 skipSizeCheck（随文档编辑变化）
+    'CHANGELOG.md'        = 20561   # 记录值；仍在 skipSizeCheck（随文档编辑变化）
     'LICENSE'             = 1073
-    'check.ps1'           = 0       # 在 $skipSizeCheck 里，不参与比对（旧值 13564 早已失效）
+    'check.ps1'           = 0       # 在 $skipSizeCheck 里，不参与比对
     'verify.ps1'          = 0       # 自引用：写死自身字节必然追不上，不参与校验
-    'defaults/preset-caps.json' = 4069   # A 规则名册：剔除差集字段后的通用基准数据
+    'defaults/preset-caps.json' = 4069   # 兜底快照（live 名册不可用时）
     'docs/preset-bench.md'      = 0      # 文档，随编辑变化（只校验存在性）
     'index.mjs'                 = 918    # v1.0.7：裸包名行（让 dsh.client 被发现的空壳）
     'lib/client.js'             = 10450   # A 规则（通用性修正）：设置页基准校准提示词（全局编号表版）
@@ -201,6 +201,7 @@ if (-not (Test-Path -LiteralPath $pkgDir -PathType Container)) {
     $readErr  = 0
     # 读取失败明细先收集（文件名 + 原因），循环结束后只发一条 1/5，避免同号重复、failCount 按文件数翻倍
     $readFailures = @()
+    $missingNames = @()
     foreach ($name in $expected.Keys) {
         $fp = Join-Path $pkgDir $name
         $skip = ($skipSizeCheck -contains $name)
@@ -211,6 +212,7 @@ if (-not (Test-Path -LiteralPath $pkgDir -PathType Container)) {
                 $fileRows += ("  {0,-20} {1,10}  期望 {2}" -f $name, 'MISSING', $expected[$name])
             }
             $missing++
+            $missingNames += $name
             continue
         }
         try {
@@ -254,7 +256,7 @@ if (-not (Test-Path -LiteralPath $pkgDir -PathType Container)) {
     } elseif ($missing -gt 0 -and $isNewBuildLayout) {
         # 脚本自身属于 1.0.8 新布局（脚本目录含新文件），而装机副本还是 1.0.7：
         # 新文件缺失属「未装新版」，不是包损坏。降级为 OK（不计 FAIL）；其余文件齐全性照常已核。
-        Report 'OK' '1/5' '包落盘' ('缺 2 个 1.0.8 新文件（blackpig-anchor.mjs / CHANGELOG.md）——本脚本来自 1.0.8 构建目录，装机副本仍是 1.0.7，属「新版未装」状态，非包损坏；装完 1.0.8 后复跑应为 0 缺件')
+        Report 'OK' '1/5' '包落盘' ('缺 {0} 个文件（{1}）——本脚本来自构建目录，装机副本落后于源码，属「新版未装」状态，非包损坏；装完后复跑应为 0 缺件' -f $missing, (($missingNames | Sort-Object) -join ' / '))
     } elseif ($missing -gt 0) {
         Report 'FAIL' '1/5' '包落盘' ("目录存在，但缺 {0} 个文件（共 {1} 个应到）" -f $missing, $expected.Count)
     } elseif ($sizeBad -gt 0 -and $StrictSizes) {
@@ -408,7 +410,7 @@ function Invoke-DumpConfig {
 
 if (-not $dshCmd) {
     Report 'FAIL' '0/5' 'dsh' '找不到 dsh.cmd，无法验证运行时能否合成' -Hard
-    # [3] 补一条 4/5：结论段声称编号覆盖 0/5–4/5，而这里原来只发 0/5 就离开，
+    # [3] 补一条 4/5：结论段声称编号覆盖 0/5–5/5，而这里原来只发 0/5 就离开，
     # 整轮不出现 4/5，与说明不符。现按「跳过」明确报出（同一根因，属如实计分）。
     Report 'FAIL' '4/5' 'dump-config' 'dsh 不可用，跳过运行时合成验证'
     [void]$script:verdicts.Add('找不到 dsh.cmd')
@@ -698,7 +700,78 @@ if (keys.length === 0) {
     }
 }
 
-# ── 结论（非检查项；检查项编号为 0/5 – 4/5，该说明已写进下面的结论行）──
+# ── 5/5 人格与遮蔽静态断言（只读；不启动会话、不量运行时字节）──────────────
+# >>> PERSONA_ASSERTIONS（单一真相：tools/assert-persona.mjs 解析本块，勿另抄一份）
+$personaNeedles = @(
+    'subagent_preset` is the only way out'
+    'DELEGATED_CALLER'
+    'childSessionId'
+    'a second send runs the brief twice'
+    'targetState=finished'
+    'takes no target'
+    'ask_user_question'
+    '>=2'
+    'no usable subagent exists'
+    'based on your findings, fix it'
+    'spend it sparingly'
+    'Ask for the answer, not the file'
+)
+$personaBanned = @(
+    'roster, not a liveness probe'
+    'it reports only that input reached your own inbox'
+    'Deliver files, not paths'
+    'suitable:'
+    '(N tools)'
+)
+# <<< PERSONA_ASSERTIONS
+$personaProblems = New-Object System.Collections.ArrayList
+$personaParas = @()
+$personaCordisPath = Join-Path $scriptDir 'cordis.patch.yml'
+try {
+    $cordisLines = @(Get-Content -LiteralPath $personaCordisPath -Encoding UTF8)
+    $cordisRaw = ($cordisLines -join "`n")
+    $prefixIdx = -1
+    for ($i = 0; $i -lt $cordisLines.Count; $i++) {
+        if ($cordisLines[$i].Trim() -eq 'prefix: |-') { $prefixIdx = $i; break }
+    }
+    $blockLines = New-Object System.Collections.ArrayList
+    if ($prefixIdx -ge 0) {
+        for ($j = $prefixIdx + 1; $j -lt $cordisLines.Count; $j++) {
+            $line = $cordisLines[$j]
+            if ($line -eq '') { [void]$blockLines.Add(''); continue }
+            if ($line -match '^ {14}') { [void]$blockLines.Add($line.Substring(14)); continue }
+            break
+        }
+    }
+    $personaText = ($blockLines -join "`n")
+    $personaParas = @($personaText -split "\r?\n\r?\n" | Where-Object { $_.Trim() -ne '' })
+    if ($personaParas.Count -ne 9) { [void]$personaProblems.Add("人格段数=$($personaParas.Count)（应为 9）") }
+    foreach ($needle in $personaNeedles) {
+        if (-not $cordisRaw.Contains($needle)) { [void]$personaProblems.Add("缺 needle: $needle") }
+    }
+    foreach ($banned in $personaBanned) {
+        if ($cordisRaw.Contains($banned)) { [void]$personaProblems.Add("反断言命中: $banned") }
+    }
+    $mutePath = Join-Path $scriptDir 'section-mute.mjs'
+    if (-not (Test-Path -LiteralPath $mutePath)) {
+        [void]$personaProblems.Add('缺 section-mute.mjs')
+    } else {
+        $muteText = Get-Content -LiteralPath $mutePath -Raw -Encoding UTF8
+        if (-not $muteText.Contains('harness:source')) { [void]$personaProblems.Add('section-mute.mjs 缺 harness:source') }
+        if (-not $muteText.Contains('app:web-surface')) { [void]$personaProblems.Add('section-mute.mjs 缺 app:web-surface') }
+    }
+    if (-not $cordisRaw.Contains('id: section-mute')) { [void]$personaProblems.Add('cordis.patch.yml 缺 section-mute 挂载行') }
+} catch {
+    [void]$personaProblems.Add('读取失败: ' + $_.Exception.Message)
+}
+if ($personaProblems.Count -gt 0) {
+    Report 'FAIL' '5/5' '人格/遮蔽静态断言' ($personaProblems -join '; ')
+    [void]$script:verdicts.Add('人格/遮蔽静态断言未过')
+} else {
+    Report 'OK' '5/5' '人格/遮蔽静态断言' ("人格 $($personaParas.Count) 段；needle $($personaNeedles.Count) 全中；反断言 0；section-mute 已挂载")
+}
+
+# ── 结论（非检查项；检查项编号为 0/5 – 5/5，该说明已写进下面的结论行）──
 Write-Output ''
 Write-Output '------------------------------------------------------------'
 if ($script:hardStop) { $codeOut = 2 }
@@ -710,7 +783,7 @@ if ($script:verdicts.Count -eq 0) {
 } else {
     $verdict = ('有 ' + $script:verdicts.Count + ' 处待处理: ' + ($script:verdicts -join '; '))
 }
-Write-Output (" 结论（非检查项；检查项 0/5 – 4/5）: {0}" -f $verdict)
+Write-Output (" 结论（非检查项；检查项 0/5 – 5/5）: {0}" -f $verdict)
 Write-Output (" (FAIL {0} / WARN {1})" -f $script:failCount, $script:warnCount)
 if ($codeOut -eq 0) {
     Write-Output (' 下一步: 重启 DSH 后新建会话，preset 里应能看到「黑猪模式」。')

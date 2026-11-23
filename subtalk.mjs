@@ -592,18 +592,18 @@ export function apply(ctx, config) {
     ctx.tools.register({
       name: TOOL_NAME,
       description:
-        'Send a follow-up message to a worker you delegated in this mode with `subagent_preset`. ' +
-        'Use the `childSessionId` that delegation returned as `agent_id`. ' +
-        'Available to the coordinator and to any delegating agent: you can message a worker you delegated yourself (its `childSessionId` is its id). You can message any member of your subagent tree (children, grandchildren, the root) as long as sender and target share one tree; a target in another tree is refused. ' +
-        'WHAT THE RETURN VALUE PROVES: `messageId` is the host\'s admission receipt — the message is in the ' +
-        'child\'s inbox. Nothing here proves the child has STOPPED or READ it. ' +
-        'With `interrupt=true` a cancel request is also handed to the host; the host exposes no receipt for that, ' +
-        'so the result says `interruptRequested=true` and `interruptVerified=false`. Treat it as a request, not as ' +
-        'confirmation the child stopped. ' +
-        'TIMING: if the child is running when it is interrupted, the host delivers this message at the child\'s ' +
-        'NEXT TURN, not at the nearest step boundary — so the action already in flight may still complete before ' +
-        'your correction is read. Never assume the correction landed ahead of that action. ' +
-        'Team members are NOT addressed here; use `send_message` for those.',
+        'Send a follow-up message to a worker you delegated in this mode with `subagent_preset`. Use ' +
+        'the `childSessionId` that delegation returned as `agent_id`. Available to the coordinator ' +
+        'and any delegating agent. You can message any member of your subagent tree — children, ' +
+        'grandchildren, the root. WHAT THE RETURN VALUE PROVES: `messageId` is the host\'s admission ' +
+        'receipt — the message is in the child\'s inbox. Nothing here proves the child has STOPPED or ' +
+        'READ it. With `interrupt=true` a cancel request is also handed to the host; the host exposes ' +
+        'no receipt for that, so the result says `interruptRequested=true` and ' +
+        '`interruptVerified=false`. Treat it as a request, not as confirmation the child stopped. ' +
+        'TIMING: if the child is running when it is interrupted, the host delivers this message at ' +
+        'the child\'s NEXT TURN, not at the nearest step boundary — so the action already in flight ' +
+        'may still complete before your correction is read. Never assume the correction landed ahead ' +
+        'of that action. Team members are NOT addressed here; use `send_message` for those.',
       // ⚠️ 2026-11-06 通用化：目标参数改成「两种名字都收」。
       //   · 旧宿主（rc.1 及以前）只有 agent_id（会话 id）；
       //   · 新宿主（master，预计 rc.2）改叫 agent 且语义变成**名字**。
@@ -615,7 +615,7 @@ export function apply(ctx, config) {
         properties: {
           agent_id: {
             type: 'string',
-            description: 'The `childSessionId` returned by `subagent_preset` when you delegated this worker.',
+            description: 'The `childSessionId` from `subagent_preset`.',
           },
           message: {
             type: 'string',
@@ -624,11 +624,9 @@ export function apply(ctx, config) {
           interrupt: {
             type: 'boolean',
             description:
-              'Default true. When true a cancel request is sent to the child before the message, so a CORRECTION ' +
-              'is not stuck behind the long tool call it is currently running. The host gives no receipt: the child ' +
-              'stops at its next observation of the signal, and a message sent while it is being interrupted is ' +
-              'processed when its NEXT TURN starts. Pass false to ADD information while its current direction is ' +
-              'still correct — then nothing is cancelled and the message is read at the next step boundary.',
+              'Default true. When true a cancel request goes out first, so a correction is not stuck behind the running tool call; ' +
+              'the host gives no receipt and the child stops only at its next observation of the signal. ' +
+              'Pass false to add information while the direction is still correct — nothing is cancelled and the message is read at the next step boundary.',
           },
         },
         required: ['agent_id', 'message'],
@@ -856,14 +854,14 @@ export function apply(ctx, config) {
     ctx.tools.register({
       name: INTERRUPT_TOOL_NAME,
       description:
-        'Stop the current turn of a worker you delegated in this mode with `subagent_preset`, keeping its ' +
-        'inbox and any descendants intact. COORDINATOR-ONLY: a delegated child cannot use this. ' +
-        'WHAT THIS CANNOT DO: confirm the stop. The host issues a cancel request and returns nothing, and an ' +
-        'interrupt of an unknown or already-ended target is a documented silent no-op — which is why this tool ' +
-        'reports `stopRequested` and `verified=false` instead of claiming the child stopped. ' +
-        'It checks whether the target exists first and refuses instead of faking success. ' +
-        'Normally you do not need this: `send_to_subagent` requests an interrupt before it delivers. ' +
-        'Use it when you want the child to stop WITHOUT sending it anything.',
+        'Stop the current turn of a worker you delegated in this mode with `subagent_preset`, keeping ' +
+        'its inbox and any descendants intact. COORDINATOR-ONLY: a delegated child cannot use this. ' +
+        'WHAT THIS CANNOT DO: confirm the stop. The host returns nothing, and an interrupt of an ' +
+        'unknown or already-ended target is a silent no-op — hence `stopRequested` + ' +
+        '`verified=false`, never a claim it stopped. It checks whether the target exists first and ' +
+        'refuses instead of faking success. Normally you do not need this: `send_to_subagent` ' +
+        'requests an interrupt before it delivers. Use it when you want the child to stop WITHOUT ' +
+        'sending it anything.',
       // 同 send_to_subagent：两种名字都收，由 compat.applyToTools 统一算 required。
       parameters: applyToTools({
         type: 'object',
@@ -871,7 +869,7 @@ export function apply(ctx, config) {
         properties: {
           agent_id: {
             type: 'string',
-            description: 'The `childSessionId` returned by `subagent_preset` when you delegated this worker.',
+            description: 'The `childSessionId` from `subagent_preset`.',
           },
         },
         required: ['agent_id'],

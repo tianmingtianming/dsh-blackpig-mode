@@ -476,8 +476,7 @@ export function applyToTools(parameters, opts = {}) {
     properties.agent = {
       type: 'string',
       description:
-        'The agent NAME to address (newer hosts resolve it via subagents.resolveName()). ' +
-        'Pass either this or agent_id; if both are given they must be equal.',
+        'The agent name; pass either this or `agent_id`, never both with different values.',
     }
   }
   if (!Object.hasOwn(properties, 'agent_id')) {

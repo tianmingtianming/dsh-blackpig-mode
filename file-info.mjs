@@ -121,6 +121,10 @@ const TOOL_NAME = 'file_info'
 /** 一次调用允许的路径数上限。防的是一条畸形调用把整个回合拖死，不是防模型。 */
 const MAX_PATHS = 256
 
+/** 列目录模式的硬限（沿用原 ls）：条目数与文本 UTF-8 字节两个都生效，先到先截。 */
+const MAX_ENTRIES = 200
+const MAX_BYTES = 8192
+
 /** 装机后可供 grep 的两个固定标识（逐字 ASCII，不要改写或本地化）。 */
 const ENGAGED = 'FILE-INFO-ENGAGED'
 const SKIPPED = 'FILE-INFO-SKIPPED'
@@ -141,10 +145,25 @@ const PARAMETERS = {
       type: 'array',
       items: { type: 'string' },
       description:
-        'One or more paths to report on, resolved by the filesystem backend (relative paths use the session working directory).',
+        'Paths to report on, resolved by the filesystem backend (relative paths use the session working directory). ' +
+        'Required unless `list` is true.',
+    },
+    path: {
+      type: 'string',
+      description: 'Directory to list when `list` is true; defaults to the session working directory.',
+    },
+    list: {
+      type: 'boolean',
+      description:
+        '`true` lists the immediate entries of `path` (name, dir or file, bytes; never content, never recursion). ' +
+        'Omit it to report metadata for `paths`.',
+    },
+    recursive: {
+      type: 'boolean',
+      description: 'Reserved and defaults to false; this tool never recurses.',
     },
   },
-  required: ['paths'],
+  required: [],
 }
 
 /**
@@ -159,6 +178,37 @@ const OUTPUT_SCHEMA = {
   type: 'object',
   additionalProperties: false,
   properties: {
+    mode: {
+      type: 'string',
+      enum: ['metadata', 'listing'],
+      description: 'Which mode produced this value.',
+    },
+    listing: {
+      type: 'object',
+      additionalProperties: false,
+      description: 'Present only in listing mode: the direct entries of one directory.',
+      properties: {
+        path: { type: 'string' },
+        entries: {
+          type: 'array',
+          items: {
+            type: 'object',
+            additionalProperties: false,
+            properties: {
+              name: { type: 'string' },
+              kind: { type: 'string', enum: ['dir', 'file'] },
+              sizeBytes: { type: 'integer' },
+            },
+            required: ['name', 'kind', 'sizeBytes'],
+          },
+        },
+        total: { type: 'integer' },
+        shown: { type: 'integer' },
+        truncated: { type: 'boolean' },
+        notice: { type: 'string' },
+      },
+      required: ['path', 'entries', 'total', 'shown', 'truncated', 'notice'],
+    },
     entries: {
       type: 'array',
       description: 'One entry per requested path, in the requested order.',
@@ -227,7 +277,7 @@ const OUTPUT_SCHEMA = {
       ],
     },
   },
-  required: ['entries', 'totals'],
+  required: ['mode', 'entries', 'totals'],
 }
 
 /** 一个每次进程每种原因只警告一次的记录器（避免刷屏）。 */
@@ -266,15 +316,36 @@ function typeName(value) {
  * @param args - 模型生成的原始参数，形状任意。
  * @returns 校验通过的路径数组（保留调用方顺序）。
  */
-function parsePaths(args) {
+function parseArgs(args) {
   if (args === null || typeof args !== 'object' || Array.isArray(args)) {
-    throw new Error(`${TOOL_NAME}: arguments must be an object with a "paths" array, received ${typeName(args)}`)
+    throw new Error(`${TOOL_NAME}: arguments must be an object, received ${typeName(args)}`)
   }
   // 声明了 additionalProperties: false 就必须真的拒绝多余键 —— 否则 schema 在说谎。
   for (const key of Object.keys(args)) {
-    if (key !== 'paths') {
-      throw new Error(`${TOOL_NAME}: unknown argument "${key}"; this tool accepts only "paths"`)
+    if (key !== 'paths' && key !== 'path' && key !== 'list' && key !== 'recursive') {
+      throw new Error(`${TOOL_NAME}: unknown argument "${key}"; this tool accepts only "paths", "path", "list", "recursive"`)
     }
+  }
+  if (args.list !== undefined && typeof args.list !== 'boolean') {
+    throw new Error(`${TOOL_NAME}: "list" must be a boolean, received ${typeName(args.list)}`)
+  }
+  // `recursive` 是保留参数：接受但永不递归（与合并前的 ls 行为一致）。
+  if (args.recursive !== undefined && typeof args.recursive !== 'boolean') {
+    throw new Error(`${TOOL_NAME}: "recursive" must be a boolean; it is reserved and never recurses`)
+  }
+
+  if (args.list === true) {
+    if (args.paths !== undefined) {
+      throw new Error(`${TOOL_NAME}: pass either "paths" (metadata) or "path" (listing), not both`)
+    }
+    if (args.path !== undefined && (typeof args.path !== 'string' || args.path.trim() === '')) {
+      throw new Error(`${TOOL_NAME}: "path" must be a non-empty string when "list" is true`)
+    }
+    return { mode: 'listing', path: args.path }
+  }
+
+  if (args.path !== undefined) {
+    throw new Error(`${TOOL_NAME}: "path" is only valid with "list": true; use "paths" for metadata`)
   }
   const paths = args.paths
   if (paths === undefined) {
@@ -297,7 +368,7 @@ function parsePaths(args) {
       throw new Error(`${TOOL_NAME}: paths[${index}] must be a non-empty string`)
     }
   }
-  return paths
+  return { mode: 'metadata', paths }
 }
 
 /**
@@ -530,6 +601,115 @@ function totalsOf(entries) {
   return totals
 }
 
+/** 列目录的裁剪说明（条目数与字节数两个上限共用同一口径，沿用原 ls 文案）。 */
+function truncationNotice(shown, total) {
+  return `Showing ${shown} of ${total} entries; output truncated (cap ${MAX_ENTRIES} entries / ${MAX_BYTES} bytes). ` +
+    'Use a narrower path, or dispatch a worker to enumerate more.'
+}
+
+/** 把 listing 值渲染成模型面文本（execute 用它算字节预算，render 用它出最终文本 —— 逐字一致）。 */
+function listingLines(listing) {
+  const entries = Array.isArray(listing?.entries) ? listing.entries : []
+  const lines = [
+    `<file_info mode="listing" path="${escapeAttribute(listing?.path ?? '')}" total="${listing?.total ?? entries.length}" shown="${listing?.shown ?? entries.length}" truncated="${listing?.truncated === true}">`,
+  ]
+  for (const entry of entries) {
+    lines.push(
+      `  <entry kind="${escapeAttribute(entry?.kind ?? 'file')}" name="${escapeAttribute(entry?.name ?? '')}" bytes="${entry?.sizeBytes ?? 0}"/>`,
+    )
+  }
+  if (typeof listing?.notice === 'string' && listing.notice !== '') {
+    lines.push(`  <notice>${escapeAttribute(listing.notice)}</notice>`)
+  }
+  lines.push('</file_info>')
+  return lines
+}
+
+/**
+ * 列一个目录的直接子条目。
+ *
+ * 只调 `fs.resolve` / `fs.stat` / `fs.listDir` —— 全部经 `ctx.fs` 这道部署围栏，
+ * **没有任何读取文件正文的调用**。沿用原 ls 的硬限（条目数优先、再按文本字节回退裁剪），
+ * 永不递归；目录项大小取 `listDir` 给的 `size`，取不到记 0（绝不编造、绝不读正文）。
+ *
+ * @param fs - `ctx.fs` 服务。
+ * @param requestedPath - `path` 参数（可为 undefined，表示会话 cwd）。
+ * @param options - 已含 cwd / signal 的解析选项。
+ * @param signal - 取消信号。
+ * @returns 与 OUTPUT_SCHEMA.listing 逐字一致的对象。
+ */
+async function inspectDirectory(fs, requestedPath, options, signal) {
+  const raw = typeof requestedPath === 'string' && requestedPath !== '' ? requestedPath : '.'
+  let target
+  try {
+    target = await fs.resolve(raw, options)
+  } catch (error) {
+    throw new Error(`${TOOL_NAME}: path does not exist or cannot be inspected: ${raw} (${error instanceof Error ? error.message : String(error)})`)
+  }
+  const display = typeof target?.displayPath === 'string' && target.displayPath !== '' ? target.displayPath : raw
+
+  let info
+  try {
+    info = await fs.stat(target, signal)
+  } catch (error) {
+    throw new Error(`${TOOL_NAME}: path does not exist or cannot be inspected: ${display} (${error instanceof Error ? error.message : String(error)})`)
+  }
+  if (info === undefined || info === null) {
+    throw new Error(`${TOOL_NAME}: path does not exist: ${display}`)
+  }
+  if (info.type !== 'directory') {
+    throw new Error(`${TOOL_NAME}: not a directory: ${display}`)
+  }
+
+  let listed
+  try {
+    listed = await fs.listDir(target, signal)
+  } catch (error) {
+    throw new Error(`${TOOL_NAME}: cannot list directory: ${display} (${error instanceof Error ? error.message : String(error)})`)
+  }
+
+  const rows = []
+  for (const entry of Array.isArray(listed) ? listed : []) {
+    const isDir = entry?.type === 'directory'
+    let sizeBytes = 0
+    if (!isDir) {
+      const size = entry?.size
+      if (typeof size === 'number' && Number.isFinite(size) && size >= 0) sizeBytes = Math.trunc(size)
+    }
+    rows.push({ name: String(entry?.name ?? ''), kind: isDir ? 'dir' : 'file', sizeBytes })
+  }
+  rows.sort((a, b) => {
+    if (a.kind !== b.kind) return a.kind === 'dir' ? -1 : 1
+    if (a.name < b.name) return -1
+    if (a.name > b.name) return 1
+    return 0
+  })
+
+  const total = rows.length
+  // 硬顶 1：条目数。
+  let kept = rows.slice(0, MAX_ENTRIES)
+  let truncated = total > kept.length
+  let notice = truncated ? truncationNotice(kept.length, total) : ''
+
+  // 硬顶 2：文本字节数。逐条回退，直到渲染文本 ≤ MAX_BYTES（说明文字也计入预算）。
+  const fits = (entries, note) =>
+    Buffer.byteLength(
+      listingLines({ path: display, entries, total, shown: entries.length, truncated: total > entries.length || note !== '', notice: note }).join('\n'),
+      'utf8',
+    ) <= MAX_BYTES
+  while (kept.length > 0 && !fits(kept, notice)) {
+    kept = kept.slice(0, kept.length - 1)
+    truncated = true
+    notice = truncationNotice(kept.length, total)
+  }
+  // 极端情况：连一条 + 说明都装不下 → 只回一条极简说明（仍带总数）。
+  if (kept.length === 0 && !fits(kept, notice)) {
+    notice = `Output truncated (cap ${MAX_BYTES} bytes); ${total} entries exist. Dispatch a worker to enumerate them.`
+  }
+
+  return { path: display, entries: kept, total, shown: kept.length, truncated, notice }
+}
+
 /**
  * 把值渲染成模型面文本。
  *
@@ -544,6 +724,9 @@ function totalsOf(entries) {
  * @returns 一个文本内容块。
  */
 function render(_args, value) {
+  if (value?.mode === 'listing') {
+    return [{ type: 'text', text: listingLines(value?.listing ?? {}).join('\n') }]
+  }
   const entries = Array.isArray(value?.entries) ? value.entries : []
   const totals = value?.totals ?? {}
   const lines = [
@@ -604,12 +787,15 @@ export function apply(ctx, config) {
     ctx.tools.register({
       name: TOOL_NAME,
       description:
-        'Report read-only metadata (byte count, kind) for one or more paths in a single call. ' +
-        'Returns one entry per requested path: a regular file reports its byte count, or an explicit unknown-size marker ' +
-        'when the filesystem backend does not provide one (never a fabricated 0); a directory is reported as a directory ' +
-        'without a byte count; a missing or uninspectable path is reported as such and never as 0 bytes. ' +
-        'The totals field sums the known byte counts. Use this instead of shell commands to measure or verify file sizes; ' +
-        'nothing is read into the conversation and nothing is modified.',
+        'Report read-only metadata (byte count, kind) for one or more paths, or list a directory. ' +
+        'Default mode reports one entry per requested path: a regular file reports its byte count, or an explicit ' +
+        'unknown-size marker when the backend provides none (never a fabricated 0); a directory is reported as a ' +
+        'directory without a byte count; a missing or uninspectable path is reported as such and never as 0 bytes. ' +
+        'With `list: true`, pass one `path` and get its immediate entries (name, dir or file, bytes): names only, ' +
+        'never content, never recursion. Listing output is capped at 200 entries / 8192 bytes and truncated with ' +
+        'the total. `recursive` is reserved and never recurses. The totals field sums the known byte counts. ' +
+        'Use this instead of shell commands to measure sizes or discover names; nothing is read into the ' +
+        'conversation and nothing is modified.',
       parameters: PARAMETERS,
       output: {
         schema: OUTPUT_SCHEMA,
@@ -618,8 +804,8 @@ export function apply(ctx, config) {
       // 纯只读 ⇒ 与别的只读工具并行调度，不让它拖慢无关调用。
       isConcurrencySafe: () => true,
       async execute(args, exec) {
-        // 入参非法 ⇒ 抛出（流水线会收成 `isError: true` 的工具结果）。见 parsePaths 的注释。
-        const paths = parsePaths(args)
+        // 入参非法 ⇒ 抛出（流水线会收成 `isError: true` 的工具结果）。见 parseArgs 的注释。
+        const parsed = parseArgs(args)
 
         // ⚠️ R13b2/BUG-1：改为 await 宿主同源的 workingDirectory 投影；取不到时仍退回 header.cwd。
         const cwd = await sessionCwd(exec, ctx)
@@ -630,8 +816,14 @@ export function apply(ctx, config) {
         if (cwd !== undefined) options.cwd = cwd
         if (signal !== undefined && signal !== null) options.signal = signal
 
+        // 列目录模式：沿用原 ls 的硬限（200 条 / 8192 B），永不递归、绝不读正文。
+        if (parsed.mode === 'listing') {
+          const listing = await inspectDirectory(fs, parsed.path, options, signal)
+          return { mode: 'listing', entries: [], totals: totalsOf([]), listing }
+        }
+
         const entries = []
-        for (const requestedPath of paths) {
+        for (const requestedPath of parsed.paths) {
           // 已取消就不再逐个 stat：剩下的如实标成「没查」，不假装查过。
           if (signal?.aborted === true) {
             entries.push(makeEntry(requestedPath, requestedPath, 'error', false, 'not inspected: this call was aborted'))
@@ -640,7 +832,7 @@ export function apply(ctx, config) {
           entries.push(await inspectOne(fs, requestedPath, options, signal))
         }
 
-        return { entries, totals: totalsOf(entries) }
+        return { mode: 'metadata', entries, totals: totalsOf(entries) }
       },
     })
   } catch (error) {

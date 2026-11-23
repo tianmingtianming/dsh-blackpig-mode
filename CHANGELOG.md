@@ -1,10 +1,20 @@
 # Changelog — dsh-blackpig-mode
 
-## 1.0.10（2026-11-23 原地覆盖；版本号字符串不变，仍是 1.0.10）
+## 1.0.10（2026-11-23～2026-11-24 原地覆盖；版本号字符串不变，仍是 1.0.10）
 
 > 本节记的是**同一个版本号下的原地覆盖**：`package.json` 的 `version` 保持 `1.0.10`，
 > 只重打 tgz 并覆盖 GitHub Release `v1.0.10` 的资产，不产生 1.0.11。
 > 判断装机版本仍看 `package.json` 的 `version` + 本节日期。
+
+### 2026-11-24 阶段 1–5（人格/描述压缩、`ls` 并入、名册实时派生、段遮蔽）
+
+> 同一版本号 `1.0.10` 下的原地改动；**版本号不 bump**。
+
+- **人格（阶段 1）**：`persona.prefix` 仍是 **9 段**，删/压 14 处（P1/P4/P5/P6/P8/P9），新增「上下文纪律」一节；判据只认段数 9 与逐条断言。
+- **工具描述压缩（阶段 2）**：上线口径 `send_to_subagent` 2,262→**1,854** B、`stop_subagent` 1,105→**923** B、`subagent_preset` 1,395→**1,197** B。
+- **`ls` 并入 `file_info`（阶段 3）**：工具面 **16→15**；`file_info` 新增 `list?: boolean`（列直接子条目，200 条 / 8192 B 硬顶，永不递归），`ls-tool.mjs` 删除。
+- **名册改为实时派生（阶段 4）**：`list: true` 优先走 `agentPresets.acquireScope` + `tools.view` + `skills.list`；接口缺失才回退 `preset-caps.json`；每模式只列编号区间（不再有 `(N tools)` / suitable 两行），新增 `skills:` 行；取不到的模式保留行并标 `[snapshot]` / `[unknown]`。
+- **新增 `section-mute.mjs`（阶段 5）**：在 preset scope 注册空文本段遮蔽 `harness:source`（10,000）与 `app:web-surface`（10,100）；宿主 `renderPrompt` 丢弃空文本段，故不进 prompt。
 
 ### 2026-11-23 最终修订（9 段人格 + 四处回执/判据订正 + preset-bench 通用化）
 

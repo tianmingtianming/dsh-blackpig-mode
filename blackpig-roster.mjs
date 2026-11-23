@@ -252,30 +252,119 @@ function loadPresetCaps() {
   return { ok: false, reason: 'missing', errors }
 }
 
-/** 一行里的空白折成单个空格并去首尾空白（JSON 里的说明可能带换行）。 */
-const oneLine = (text) => String(text).replace(/\s+/g, ' ').trim()
+/**
+ * 当前工作目录 —— 技能枚举必须带 cwd，否则会漏掉项目级技能。
+ *
+ * @param ctx - 插件上下文。
+ * @returns 非空字符串 cwd（取不到时退回 process.cwd()）。
+ */
+async function currentCwd(ctx) {
+  try {
+    const wd = typeof ctx?.get === 'function' ? ctx.get('workingDirectory') : undefined
+    if (wd !== undefined && wd !== null && typeof wd.ensure === 'function') {
+      const current = await wd.ensure()
+      if (typeof current === 'string' && current.trim() !== '') return current
+      if (current !== null && typeof current === 'object' && typeof current.cwd === 'string' && current.cwd.trim() !== '') {
+        return current.cwd
+      }
+    }
+  } catch {
+    // 服务缺失 / 抛错 → 退回 process.cwd()。
+  }
+  try {
+    return process.cwd()
+  } catch {
+    return '.'
+  }
+}
 
 /**
- * A 规则编号（2026-11-20）：按 caps.presets 键顺序遍历各模式的 tools 数组，
- * 工具名首次出现即分配号码（从 1 递增），已发号固定不重排，新工具追加表尾。
- * 编号不写进 caps 文件，渲染时现场计算；standard 因为是第一个 preset 固定占前段。
+ * 从**活注册表**实时派生每个已安装模式的工具清单与技能清单。
  *
- * @param caps - 已通过校验的 caps 对象。
- * @returns Map<工具名, 序号>（序号从 1 开始）。
+ * 每个模式通过 `agentPresets.acquireScope(id)` 拿到该 preset 的 ScopeKey，
+ * 再用 `tools.view(key).visible.keys()` 取「已应用 restriction 的可见工具名」
+ * （不用 definitions()/schemas()：前者多一次数组分配，后者深拷贝）。
+ * 技能用 `skills.list({ cwd, scope: key })`。
+ *
+ * @param ctx - 插件上下文。
+ * @param selfId - 本模式自己的 preset id（名册不列自己）。
+ * @returns 行数组；接口缺失（老宿主）时返回 null，由调用方走 caps 兜底。
+ *   单模式失败**不拖垮整体**：该行回填 `live:false` 与错误原因。
  */
-function computeNumbering(caps) {
-  const map = new Map()
-  const presets = caps?.presets ?? {}
-  for (const id of Object.keys(presets)) {
-    const tools = presets[id]?.tools
-    if (!Array.isArray(tools)) continue
-    for (const raw of tools) {
-      const name = String(raw)
-      if (!map.has(name)) map.set(name, map.size + 1)
+async function collectLive(ctx, selfId) {
+  const get = (name) => {
+    try {
+      return typeof ctx?.get === 'function' ? ctx.get(name) : undefined
+    } catch {
+      return undefined
     }
   }
-  return map
+  const presets = get('agentPresets')
+  const tools = get('tools')
+  if (typeof presets?.acquireScope !== 'function' || typeof tools?.view !== 'function') return null
+
+  const skills = get('skills')
+  const cwd = await currentCwd(ctx)
+  let rows
+  try {
+    rows = await presets.list()
+  } catch {
+    return null
+  }
+  if (!Array.isArray(rows)) return null
+
+  const out = []
+  for (const row of rows) {
+    if (row === null || typeof row !== 'object') continue
+    if (row.id === selfId) continue
+    // broken 模式不许消失：出一行、用 caps 回填，回填不到则 [unknown]。
+    if (row.broken !== undefined) {
+      out.push({
+        id: row.id,
+        tools: [],
+        skills: [],
+        live: false,
+        broken: String(row.broken),
+        error: 'broken: ' + String(row.broken),
+      })
+      continue
+    }
+    let lease
+    try {
+      lease = await presets.acquireScope(row.id)
+      const names = [...tools.view(lease.key).visible.keys()]
+      let skillNames = []
+      try {
+        if (skills !== undefined && skills !== null && typeof skills.list === 'function') {
+          const listed = await skills.list({ cwd, scope: lease.key })
+          if (Array.isArray(listed)) {
+            skillNames = listed.map((entry) => String(entry?.name ?? '')).filter((entry) => entry !== '')
+          }
+        }
+      } catch {
+        // 技能枚举失败不影响工具名册。
+      }
+      out.push({ id: row.id, tools: names, skills: skillNames, live: true })
+    } catch (error) {
+      out.push({
+        id: row.id,
+        tools: [],
+        skills: [],
+        live: false,
+        error: error instanceof Error ? error.message : String(error),
+      })
+    } finally {
+      // 必须释放：generation.users 不归零时该 preset 永不卸载。
+      try {
+        await lease?.[Symbol.asyncDispose]?.()
+      } catch {
+        // dispose 失败不改变名册结论。
+      }
+    }
+  }
+  return out
 }
+
 
 /** 三位补零编号。 */
 const num3 = (n) => String(n).padStart(3, '0')
@@ -298,7 +387,7 @@ function compressRuns(nums) {
  * 渲染全局编号表：按序号升序，`[NNN] 工具名` 逗号平铺，每行约 100 字符折行，绝不截断。
  * （2026-11-20 排版优化：由「一行一个」改为逗号平铺，省掉约 99 个换行 token。）
  *
- * @param numbering - computeNumbering() 得到的 Map。
+ * @param numbering - 编号 Map（renderRows 现场计算）。
  * @returns 编号表文本（不含首尾空行）。
  */
 function renderNumberedTable(numbering) {
@@ -321,79 +410,105 @@ function renderNumberedTable(numbering) {
 }
 
 /**
- * 渲染名册（A 规则，2026-11-20）—— **只读 `preset-caps.json`，不查注册表、不做能力推导**。
+ * 渲染名册（2026-11-24 阶段 4：改为实时派生，静态 caps 只作兜底）。
  *
- * 输出形状（无 BASELINE、无 lacks/gains 差集对比）：
+ * 输出形状：
  *
  *     Tool roster (A numbering: first-seen order across presets; installed modes missing here can still be dispatched if you know their id)
  *     Global tool index (N tools):
- *     [001] tool_a
- *     [002] tool_b
- *     ...
+ *     [001] tool_a, [002] tool_b, …
  *
- *     - standard (64 tools): [001-064]
- *       suitable: …
- *       not suitable: …
- *     - minimal (35 tools): [003-005] [015-032] …
- *       suitable: …
- *       not suitable: …
+ *     - standard: [001-064]
+ *     - minimal: [003-005] [015-032]
+ *     skills: 12 installed — a, b, c; x only in modeA, modeB
  *
- * 规则（A 规则）：
- *   · 编号 = computeNumbering() 现场按 presets 键顺序 + tools 首现顺序分配，standard 固定占前段。
- *   · 先出全局平铺编号表（renderNumberedTable，`[NNN] 工具名` 逗号平铺、约 100 字符折行，绝不截断）。
- *   · 每个模式只显示 tools 对应的编号连续段压缩 + suitable/notSuitable 两行；
- *     不显示 comparisonSummary / only / lacks / gains（旧格式字段被忽略）。
- *   · `hidden: true` 仍跳过；自己（selfId）跳过。
+ * 规则：
+ *   · 编号按 rows 顺序（registry 顺序）× 每个模式自己的工具顺序首现分配，绝不截断。
+ *   · 每模式只用编号区间表达：不写 `(N tools)`、不写 suitable / notSuitable。
+ *   · 回填行（`live !== true`）在行末标 ` [snapshot]`。
+ *   · 技能只在 live 行里聚合；`only in …` 只列「不是所有 live 模式都有」的技能。
  *   · **不设字节上限**（`ROSTER_HARD_CAP_BYTES` 已整体移除，别加回来）。
+ *
+ * @param rows - `[{ id, tools, skills?, live }]`，顺序即 registry 顺序。
+ * @returns `{ text, degraded }`。
+ */
+function renderRows(rows) {
+  const degraded = []
+  if (!Array.isArray(rows) || rows.length === 0) {
+    return { text: 'No preset entry is visible.', degraded: ['roster-empty'] }
+  }
+
+  // A 规则编号：rows 顺序 × 每个模式的工具顺序，首现发号。
+  const numbering = new Map()
+  for (const row of rows) {
+    for (const raw of Array.isArray(row?.tools) ? row.tools : []) {
+      const name = String(raw)
+      if (!numbering.has(name)) numbering.set(name, numbering.size + 1)
+    }
+  }
+
+  const lines = [
+    'Tool roster (A numbering: first-seen order across presets; installed modes missing here can still be dispatched if you know their id)',
+    '',
+    `Global tool index (${numbering.size} tools):`,
+    renderNumberedTable(numbering),
+    '',
+  ]
+
+  for (const row of rows) {
+    const tools = Array.isArray(row?.tools) ? row.tools : []
+    const nums = tools.map((tool) => numbering.get(String(tool))).filter((n) => typeof n === 'number')
+    if (row.unknown === true) {
+      lines.push(`- ${row.id}: — [unknown]`)
+      continue
+    }
+    lines.push(`- ${row.id}: ${compressRuns(nums)}${row.live === true ? '' : ' [snapshot]'}`)
+  }
+
+  // 技能：合并成一行，避免每个模式重复一遍。
+  const skillRows = rows.filter((row) => row?.live === true && Array.isArray(row.skills))
+  const order = []
+  const modesOf = new Map()
+  for (const row of skillRows) {
+    for (const name of row.skills) {
+      if (!modesOf.has(name)) {
+        modesOf.set(name, [])
+        order.push(name)
+      }
+      const modes = modesOf.get(name)
+      if (!modes.includes(row.id)) modes.push(row.id)
+    }
+  }
+  if (order.length > 0) {
+    const only = []
+    for (const name of order) {
+      const modes = modesOf.get(name)
+      if (modes.length < skillRows.length) only.push(`${name} only in ${modes.join(', ')}`)
+    }
+    lines.push(`skills: ${order.length} installed — ${order.join(', ')}${only.length > 0 ? '; ' + only.join('; ') : ''}`)
+  }
+
+  return { text: lines.join('\n'), degraded }
+}
+
+/**
+ * 用静态 caps 构造 rows（兜底路径）：每行都是 snapshot，不带技能。
  *
  * @param caps - 已通过校验的 caps 对象。
  * @param selfId - 本模式自己的 preset id。
- * @returns `{ text, degraded }`。
+ * @returns rows 数组（顺序同 caps.presets 键顺序）。
  */
-function renderRoster(caps, selfId) {
-  const degraded = []
-
+function rowsFromCaps(caps, selfId) {
+  const rows = []
   const presets = caps?.presets ?? {}
-  const ids = Object.keys(presets)
-  if (ids.length === 0) {
-    return { text: 'No preset baseline found: preset-caps.json declares no mode.', degraded: [...degraded, 'preset-caps-empty'] }
-  }
-
-  const lines = ['Tool roster (A numbering: first-seen order across presets; installed modes missing here can still be dispatched if you know their id)', '']
-
-  // ── 全局编号表：A 规则首现编号，逗号平铺约 100 字符折行，绝不截断 ──
-  const numbering = computeNumbering(caps)
-  lines.push(`Global tool index (${numbering.size} tools):`)
-  lines.push(renderNumberedTable(numbering))
-  lines.push('')
-
-  let shown = 0
-  for (const id of ids) {
+  for (const id of Object.keys(presets)) {
     if (id === selfId) continue
     const entry = presets[id]
-    if (entry === null || typeof entry !== 'object' || Array.isArray(entry)) {
-      degraded.push('invalid-entry:' + id)
-      continue
-    }
+    if (entry === null || typeof entry !== 'object' || Array.isArray(entry)) continue
     if (entry.hidden === true) continue
-    const tools = Array.isArray(entry.tools) ? entry.tools : []
-    const count = typeof entry.toolCount === 'number' ? entry.toolCount : tools.length
-    const nums = tools.map((t) => numbering.get(String(t))).filter((n) => typeof n === 'number')
-    const headline = `- ${id} (${count}${count === 1 ? ' tool' : ' tools'}): ${compressRuns(nums)}`
-    lines.push(headline)
-    const suitable = typeof entry.suitableFor === 'string' ? oneLine(entry.suitableFor) : ''
-    const notSuitable = typeof entry.notSuitableFor === 'string' ? oneLine(entry.notSuitableFor) : ''
-    if (suitable !== '') lines.push('  suitable: ' + suitable)
-    if (notSuitable !== '') lines.push('  not suitable: ' + notSuitable)
-    shown += 1
+    rows.push({ id, tools: Array.isArray(entry.tools) ? entry.tools.map(String) : [], skills: [], live: false })
   }
-  if (shown === 0) {
-    return {
-      text: 'No preset baseline entry is visible (every entry is hidden, or is this mode itself).',
-      degraded: [...degraded, 'roster-empty'],
-    }
-  }
-  return { text: lines.join('\n'), degraded }
+  return rows
 }
 
 /**
@@ -783,15 +898,13 @@ export function apply(ctx, config) {
     ctx.tools.register({
       name: TOOL_NAME,
       description:
-        'Delegate a self-contained task to a worker running under one specific installed agent mode (preset). ' +
-        '`preset` is REQUIRED — there is no default, because the wrong default silently wastes a whole run. ' +
-        'Call with `list: true` FIRST to read the roster: a global numbered tool index plus, per mode, ' +
-        'its tool-number ranges and what it is / is not suitable for (preset-caps.json, A numbering). ' +
-        'Pick by that suitability, not by the mode name. ' +
-        'The roster only shows modes that were benchmarked. ' +
-        'A returned `degraded` field is absent when nothing degraded; `stop: true` means do not retry. ' +
-        'The worker does not see this conversation, so the brief must be self-contained. ' +
-        'It starts in the background and this call returns its id immediately.',
+        'Delegate a task to a worker running under one specific installed agent mode (preset). ' +
+        '`preset` is REQUIRED — there is no default, because the wrong default silently wastes a ' +
+        'whole run. Call with `list: true` FIRST to read the roster before choosing. Pick by those ' +
+        'ranges, not by the mode name. The roster lists installed modes; an installed mode missing from it can still be dispatched if you know its id. A returned ' +
+        '`degraded` field is absent when nothing degraded; `stop: true` means do not retry. The ' +
+        'worker does not see this conversation. It starts in the background and this call returns its ' +
+        'id immediately.',
       parameters: {
         type: 'object',
         additionalProperties: false,
@@ -802,7 +915,7 @@ export function apply(ctx, config) {
           },
           prompt: {
             type: 'string',
-            description: 'The complete, self-contained task. The worker runs under a DIFFERENT mode and cannot see this conversation.',
+            description: 'The complete, self-contained task. The worker runs under a DIFFERENT mode.',
           },
           description: {
             type: 'string',
@@ -814,14 +927,14 @@ export function apply(ctx, config) {
             // 为什么删（两条理由都经代码核查）：
             //   ① 只服务基准测试，日常无用 —— 黑猪日常只需 `list: true`（读 preset-caps.json）+ `delegate`；
             //   ② 它绕过 hidden 过滤 —— `renderAllPresetIds()` 完全不读 `preset-caps.json`、不判 hidden，
-            //      而 `renderRoster()` 有两道过滤（跳过 self、跳过 `hidden: true`）。留着 `all: true`
+            //      而 `renderRows()` 有两道过滤（跳过 self、跳过 `hidden: true`）。留着 `all: true`
             //      等于开一条「名册不显示、但能列出来」的后门。
             // 替代：基准测试第 1 步改成「派一个 standard worker 读 cordis.patch.yml 列 preset id」
             // （depth 仍为 2，不超 maxDepth；worker 有 read/grep），见 docs/preset-bench.md 第三节。
             type: 'boolean',
             description:
-              '`true` returns the capability roster rendered from preset-caps.json: per mode, how many tools ' +
-              'it holds and what it is / is not suitable for. Leave it out to delegate.',
+              '`true` returns the roster — a global numbered tool index plus per-mode tool-number ranges, ' +
+              'and the installed skills.',
           },
         },
         required: [],
@@ -834,6 +947,36 @@ export function apply(ctx, config) {
       isConcurrencySafe: () => true,
       async execute(args, exec) {
         if (args?.list === true) {
+          // ① 优先：从活注册表实时派生（工具清单 + 技能清单，接口缺失时返回 null）。
+          const live = await collectLive(ctx, selfId)
+          if (live !== null) {
+            // ② 单模式失败：回填 caps 对应数据，并在渲染时标 [snapshot]。
+            let caps = null
+            let capsLoaded = false
+            const rows = []
+            for (const row of live) {
+              if (row.live === true) {
+                rows.push(row)
+                continue
+              }
+              if (!capsLoaded) {
+                const loaded = loadPresetCaps()
+                caps = loaded.ok ? loaded.caps : null
+                capsLoaded = true
+              }
+              const entry = caps?.presets?.[row.id]
+              const tools = Array.isArray(entry?.tools) ? entry.tools.map(String) : []
+              rows.push({ id: row.id, tools, skills: [], live: false, unknown: entry === undefined })
+            }
+            const rendered = renderRows(rows)
+            return {
+              ok: true,
+              message: rendered.text,
+              ...rendered.degraded.length === 0 ? {} : { degraded: rendered.degraded },
+            }
+          }
+
+          // ③ 兜底：接口缺失（老宿主）→ 完全走现有 loadPresetCaps()/错误串路径。
           const loaded = loadPresetCaps()
           if (!loaded.ok) {
             // ⚠️ 2026-11-15（v3）：老格式（v1/v2）不兼容，明确回 preset-caps-invalid，不回退包内默认。
@@ -867,7 +1010,7 @@ export function apply(ctx, config) {
               },
             )
           }
-          const rendered = renderRoster(loaded.caps, selfId)
+          const rendered = renderRows(rowsFromCaps(loaded.caps, selfId))
           return {
             ok: true,
             message: rendered.text,
@@ -881,7 +1024,7 @@ export function apply(ctx, config) {
         // 的逻辑（外加 `all: false` 回落名册的兼容分支）。两条理由删掉它：
         //   ① 只服务基准测试，日常只用 `list: true` + `delegate`；
         //   ② 它绕过 hidden 过滤（`renderAllPresetIds()` 不读 preset-caps.json、不判 hidden，
-        //      而 `renderRoster()` 会跳过 self 与 `hidden: true`）。
+        //      而 `renderRows()` 会跳过 self 与 `hidden: true`）。
         // Schema 也已回到纯 boolean，所以对象形态会被宿主直接拒绝，不需要在代码里兜。
         // 基准测试要「有哪些 id」改为派 worker 读 cordis.patch.yml（见 docs/preset-bench.md）。
 

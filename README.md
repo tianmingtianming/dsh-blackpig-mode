@@ -20,7 +20,7 @@
 
 做完发现一个人生的真谛：**人生的上下文只有这么长，一定要用大部分时间去做自己愿意做的事。**
 
-技术上怎么落到这套代码上：读文件会吃掉上下文，所以把「读」这件事交给 helper——主对话的 `read` 与 `grep` 一起从工具面上摘掉（留 `grep` 等于留半个 `read`，纪律不成立），只保留只读验证工具：`file_info`（查文件类型 / 是否存在 / 字节数）、`ls`（列目录条目名）与 `read_image`（看图）；后台任务三件套 `job_list` / `job_output` / `job_kill` 已于 v1.0.10（2026-11-22）一并从保留集摘除，大脑不再能查看后台任务原始输出。这个取舍是有意识的：**代价是规划者看不到文件内容**，想知道里面写了什么，只能靠 brief 再派一个人去看，并要求带回行号和原文；**换来的是上下文不被文件内容吃掉**，主对话只承载结论和判断。所以 brief 必须自包含，验证必须换人做，汇报必须带证据——这三条不是风格要求，是这个交换成立的前提。
+技术上怎么落到这套代码上：读文件会吃掉上下文，所以把「读」这件事交给 helper——主对话的 `read` 与 `grep` 一起从工具面上摘掉（留 `grep` 等于留半个 `read`，纪律不成立），只保留只读验证工具：`file_info`（查类型 / 存在性 / 字节数；`list: true` 列目录条目名）与 `read_image`（看图）；后台任务三件套 `job_list` / `job_output` / `job_kill` 已于 v1.0.10（2026-11-22）一并从保留集摘除，大脑不再能查看后台任务原始输出。这个取舍是有意识的：**代价是规划者看不到文件内容**，想知道里面写了什么，只能靠 brief 再派一个人去看，并要求带回行号和原文；**换来的是上下文不被文件内容吃掉**，主对话只承载结论和判断。所以 brief 必须自包含，验证必须换人做，汇报必须带证据——这三条不是风格要求，是这个交换成立的前提。
 
 发出来只是为了让朋友们装起来方便——不是产品，没有客服，也没有维护承诺。代码里会有粗糙的地方，取舍也带着明显的个人偏好。**能用，但别当作品看。**
 
@@ -36,9 +36,9 @@
 
 | 设计 | 做法 | 约束住的是什么 |
 | --- | --- | --- |
-| 规划者无读取工具 | `guard-v10.mjs` 在大脑自己的 agent scope 上装 `tools.restrict()` + `tools.guard()`，`DEFAULT_KEEP` 共 **24** 个名字，其中 `subagent` / `subagent_fork` 被 `extraDeny` 一票否决（它们留在默认表里只是「撤销 extraDeny 即可恢复」的配置回滚位，**不参与可用计数**），经 `extraDeny` 后**实际可用 22 个**，分七类：核实 2 个（`file_info`（类型/存在性/字节数）、`ls`（只列目录条目名））；看图 1 个（`read_image`）；派活 3 个（`subagent_preset`、`send_to_subagent`、`stop_subagent`）；团队协作 9 个（`spawn_teammate`、`send_message`、`list_agents`、`interrupt_agent`、`wait_agent`、`team_task_create` / `list` / `get` / `update`）；长期目标 3 个（`create_goal` / `get_goal` / `update_goal`）；交互与自我管理 3 个（`todo_write`、`present`、`ask_user_question`）；计划模式条件注册 1 个（`exit_plan_mode`）；**2+1+3+9+3+3+1 = 22** | 强制出信息压缩边界：过程数据进不了主对话 |
+| 规划者无读取工具 | `guard-v10.mjs` 在大脑自己的 agent scope 上装 `tools.restrict()` + `tools.guard()`，`DEFAULT_KEEP` 共 **23** 个名字，其中 `subagent` / `subagent_fork` 被 `extraDeny` 一票否决（它们留在默认表里只是「撤销 extraDeny 即可恢复」的配置回滚位，**不参与可用计数**），经 `extraDeny` 后**实际可用 21 个**，分七类：核实 1 个（`file_info`：类型/存在性/字节数；`list: true` 列目录条目名）；看图 1 个（`read_image`）；派活 3 个（`subagent_preset`、`send_to_subagent`、`stop_subagent`）；团队协作 9 个（`spawn_teammate`、`send_message`、`list_agents`、`interrupt_agent`、`wait_agent`、`team_task_create` / `list` / `get` / `update`）；长期目标 3 个（`create_goal` / `get_goal` / `update_goal`）；交互与自我管理 3 个（`todo_write`、`present`、`ask_user_question`）；计划模式条件注册 1 个（`exit_plan_mode`）；**1+1+3+9+3+3+1 = 21** | 强制出信息压缩边界：过程数据进不了主对话 |
 | brief 必须自包含 | 队友看不到主对话，只看得到 brief。人格与工具描述都要求「点名文件路径、行号、具体改什么」，禁止「按你刚才的发现去修」 | 派活必须先把信息压成一份可执行的说明书 |
-| 验证必须独立 | 主对话只剩 `file_info` / `ls` / `read_image`：`ls` 列有哪些名字、`file_info` 验大小与存在性、`read_image` 看图；`job_output` 自 v1.0.10（2026-11-22）起已不在保留集；三者全都证明不了「文件里写了什么」。要问内容，只能再派一个人去看 | 自己验自己会互相印证错误；独立验证要求换人 |
+| 验证必须独立 | 主对话只剩 `file_info` / `read_image`：`file_info` 列有哪些名字（`list: true`）并验大小与存在性、`read_image` 看图；`job_output` 自 v1.0.10（2026-11-22）起已不在保留集；三者全都证明不了「文件里写了什么」。要问内容，只能再派一个人去看 | 自己验自己会互相印证错误；独立验证要求换人 |
 | 汇报必须带证据 | 大脑在派活的 brief 里要求回报四段：结论 / 依据（路径+行号、命令+输出、SHA256 或计数）/ 范围与限制 / 不确定。缺依据的结论，主对话不得转述为事实 | 防止把推测升级成事实汇报给用户 |
 
 派活只有一个入口：`subagent_preset`（由 `blackpig-roster.mjs` 注册），`preset` 参数必填，无默认值。`subagent` / `subagent_fork` 在主对话上被 `extraDeny` 摘掉——因为前者会固定回落到 `agentPreset: "standard"`，后者压根不支持选模式，两条旧路径都会让活派错人且**不报错**。
@@ -197,15 +197,15 @@ preset id 固定是 `blackpigmodel`，不能两个 bundle 各声明一次。会�
 
 | 文件 | 作用 |
 | --- | --- |
-| `cordis.patch.yml` | 整套 preset 声明：1 个 `insert`，25 个顶层插件行（其中 2 个是 `cordis:group`，组内还有 4 行），人格前缀整段内联在这里 |
+| `cordis.patch.yml` | 整套 preset 声明：1 个 `insert`，26 个顶层插件行（其中 2 个是 `cordis:group`，组内还有 4 行），人格前缀整段内联在这里 |
 | `guard-v10.mjs` | 大脑的工具面收窄与硬拦：`deny = 可见集 − 保留集`，只在大脑自己的 agent scope 上装；另有**两处结构性摘除**作用于队友（guard 摘 `spawn_teammate`、subtalk 摘 `stop_subagent`），那不是收窄 |
 | `compat.mjs` | **委派控制接口兼容层**：`detectControlApi` / `callSendMessage` / `resolveTargetId` / `applyToTools`。旧宿主的 `agent_id` 与新宿主的 `agent`（名字）在这里归一化，调用点不再各判一遍版本 |
-| `blackpig-roster.mjs` | `subagent_preset` 工具 + 代理名册：名册**只读静态基准文件** `preset-caps.json`（用户文件优先，回退包内 `defaults/`）；`list: true` 出能力名册；派活走活的注册表校验 |
-| `defaults/preset-caps.json` | 内置的 4 个 DSH 模式基准数据（工具数 + 适合/不适合），名册的回退来源 |
+| `blackpig-roster.mjs` | `subagent_preset` 工具 + 代理名册：`list: true` **优先从活注册表派生**（`agentPresets.acquireScope` + `tools.view` + `skills.list`），接口缺失才回退 `preset-caps.json` 快照；派活走活的注册表校验 |
+| `defaults/preset-caps.json` | 内置的 4 个 DSH 模式基准数据，**名册的兜底快照**（实时派生不可用时使用） |
 | `docs/preset-bench.md` | 基准测试怎么做、结果写哪、怎么隐藏 / 禁用模式 |
 | `subtalk.mjs` | `send_to_subagent` / `stop_subagent`：与已派出的代理继续对话或叫停，冷恢复它自己的上下文 |
-| `file-info.mjs` | `file_info`：只 stat 不读内容，给类型 / 存在性 / 字节数，一次调用可覆盖一组路径 |
-| `ls-tool.mjs` | `ls`：**只列目录下直接条目的名字**（文件 + 子目录，标 `dir`/`file` + 文件字节数），**绝不返回任何文件内容**；不 glob、不递归、不 grep、不读正文；输出硬顶 200 条 / 8 KB，超出截断并报总数；路径不存在 / 不是目录明确报错。见下方「`ls` 能力边界」一节 |
+| `file-info.mjs` | `file_info`：只 stat 不读内容，给类型 / 存在性 / 字节数；`list: true` + `path` 时列目录直接子条目（200 条 / 8 KB 硬顶、不递归），已取代原 `ls` |
+| `section-mute.mjs` | 在 preset scope 注册**空文本段**，遮蔽全局 `harness:source` / `app:web-surface` 两个 prompt 段（空文本段被宿主渲染丢弃）；任何异常只记日志、不影响启动 |
 | ~~`member-persona.mjs`~~ | **已于 v1.0.6 删除（2026-11-12）**：rc.2 下它无任何触发路径（唯一能让子会话继承黑猪 preset 的 `subagent_fork` 已被 `extraDeny` 摘掉；`subagent_preset` 派出的子代理归属别的 preset，被 L279 主动放过）。四段报告格式改由大脑在 brief 里要求 |
 | `package.json` | `dsh.bundle.patch` 声明 + `"exports": { "./*": "./*" }` 子路径映射 |
 | `README.md` | 本文件（不参与字节校验） |
@@ -215,18 +215,18 @@ preset id 固定是 `blackpigmodel`，不能两个 bundle 各声明一次。会�
 
 逐文件字节数不写在这张表里：包内的 `verify.ps1` 有一份内置参考值表，本表抄一份只会过期。要核对就运行 `verify.ps1`，第 1 项会逐个打印实际字节与参考值的差值——**它只是参考，不会让退出码变红**（要严格判就加 `-StrictSizes`）。
 
-### `ls` 能力边界（2026-11-15 新增）
+### 目录列名能力（已并入 `file_info`，2026-11-24）
 
-`ls-tool.mjs` 注册的工具名 `ls` 只补「列名」这一环，**严格不扩大**：
+原 `ls` 工具已删除，列名改由 `file_info` 的 `list: true` 完成，能力边界不变：
 
 - **只列目录下直接条目的名字**：文件 + 子目录，每条标 `dir`/`file` + 文件字节数（目录记 0）。
-- **绝不返回任何文件内容**：实现只用 `node:fs` 的 `readdirSync(path,{withFileTypes:true})` + `statSync`，没有任何读取正文的调用。
-- **不 glob、不递归、不 grep、不读正文**：`recursive` 参数保留但默认 false，实现上永不递归。
+- **绝不返回任何文件内容**：只走 `ctx.fs.resolve/stat/listDir`，没有任何读取正文的调用。
+- **不 glob、不递归、不 grep、不读正文**：`recursive` 参数保留但永不递归。
 - **输出硬顶**：最多 200 条 / 8 KB（两者取先到者），超出即截断并报总数（`total` / `shown` / `truncated`）。
-- **参数**：`path`（默认会话 cwd）、`recursive?`。路径不存在 / 不是目录 / 不可读 → 明确抛错，不静默回空表。
-- **排序**：目录在前，其余按名字字母序。
+- **参数**：`list: true` + `path`（默认会话 cwd）、`recursive?`；`list` 缺省时按 `paths` 报元数据。
+- **排序**：目录在前，其余按名字字母序；路径不存在 / 不是目录 → 明确抛错。
 
-配套流程：**`ls` 列出有哪些名字 → `file_info` 验大小/存在性 → 真需要内容才派代理去读**（要求带行号与原文，不要整篇回灌）。为什么选 `ls` 不选 `read`：`read` 会诱发大脑总去读文件、把过程数据吃进主上下文；`ls` + `file_info` 只给目录项与元数据，形成上面这条「先发现、再核实、最后才读」的闭环。
+配套流程：**`file_info(list:true)` 列有哪些名字 → `file_info(paths)` 验大小/存在性 → 真需要内容才派代理去读**（要求带行号与原文，不要整篇回灌）。
 
 三个 `[SKIP]` 的理由：`README.md` 随文档改动而变；`check.ps1` / `verify.ps1` 本身会随编辑变化（当前 `.gitattributes` 为 `*.ps1 text eol=lf`，入库与打包的换行符口径都是 LF，不会因换行符变形；但已安装副本可能落后于源码，版本不同也不是字节比对能兜住的）。它们的字节数即使写对也很快过期，所以干脆不参与。
 
@@ -237,50 +237,36 @@ preset id 固定是 `blackpigmodel`，不能两个 bundle 各声明一次。会�
 
 ---
 
-## 基准数据与模式清单（v1.0.7 起）
+## 名册：实时派生（v1.0.10 起）
 
-**`list: true` 返回的名册只读 `preset-caps.json`，不查宿主注册表、不做能力推导。**
+**`list: true` 优先从活注册表派生**：对每个已安装 preset 调 `agentPresets.acquireScope(id)` 取 scope key，
+再用 `tools.view(key).visible` 取该模式的可见工具名、用 `skills.list({ cwd, scope: key })` 取技能名；
+接口缺失（老宿主）才回退静态 `preset-caps.json` 快照。
 
-v1.0.6 及以前，名册是把「这个模式装载了哪些模块」映射成能力词（`files` / `shell` / `CAN-SPAWN-SUBAGENTS` …）。
-那条路有两个硬伤：宿主的 `definitions(scope)` 要求 scope 是活跃 Agent，所以**运行时真实可调用的工具名
-静态拿不到**（官方原文：a tool schema is not statically knowable）；而且工具集随插件增减而变，
-手维护的映射表必然过期。于是 v1.0.7 改成「跑一次基准测试，把答案存成 JSON，名册读它」。
-
-现在的名册长这样（v3 新格式，真机返回，逐字）。**先出 BASELINE standard 全量工具清单，再给每个模式一句压缩对比句**；`only` 行只在工具数 ≤2 时出现；`lacks` / `gains` 数组不打印（只在 JSON 里用于校验）：
+现在的名册结构（示例，编号与工具名随部署而变）：
 
 ```text
-Agent modes with a benchmark entry (preset-caps.json) — installed modes missing from this list can still be dispatched if you know their id
+Tool roster (A numbering: first-seen order across presets; installed modes missing here can still be dispatched if you know their id)
 
-BASELINE standard (33 tools) — full tool list:
-  ask_user_question, create_goal, edit, get_goal, glob, grep, job_kill, job_list, job_output,
-  list_agents, list_subagent_models, load_workspace_dependencies, plugin_manager, present, pwsh,
-  read, read_image, schedule_create, schedule_edit, schedule_list, schedule_view, send_message,
-  skill, subagent, subagent_fork, todo_write, update_goal, wait_agent, web_fetch, web_search,
-  workflow, working_directory, write
+Global tool index (N tools):
+[001] ask_user_question, [002] create_goal, …
 
-- standard (33 tools): 基准模式，拥有全部 33 个核心工具。
-  suitable: 本地代码与文件读写、shell 执行、子代理与工作流编排、插件管理、定时任务、联网取资料。
-  not suitable: 没有浏览器 DOM/截图/点击工具，也没有图像生成与多媒体工具，所以不能操作网页界面、不能生成图片、不能做剪辑渲染。
-- ptc (1 tool): 与 standard 无交集；仅有 run_code。
-  only: run_code
-  suitable: 写 TypeScript 程序批量编排工具调用，做循环、并发、过滤与聚合，只回传精简结论，适合大批量调用省上下文。
-  not suitable: 只有一个 run_code，不能直接逐个调工具，每次都得先写程序；依赖交互审批或人工确认的活干不了。
-- minimal (4 tools): 只保留 4 个核心工具；缺 29 个 standard 专属工具。
-  suitable: 用 shell 在本机排查故障、跑脚本，读取图片，做极简对照测试。
-  not suitable: 没有文件读写与搜索工具，只能靠 shell 命令；不能派子代理、不能联网检索，不适合批量改文件、多代理协作与检索类任务。
-- cordis (35 tools): 保留全部 standard 工具；额外多 2 个 cordis_inspect_*。
-  suitable: 开发调试 DSH 插件与 preset、查看运行时组合树，配合文件与 shell 做端到端验证。
-  not suitable: 缺浏览器 DOM/截图/点击与图像、多媒体工具，不能操作网页界面、不能生成图片、不能做剪辑渲染。
+- standard: [001-049]
+- ptc: [050]
+- davinci-editor: [003-006] … [060-099]
+skills: 12 installed — blackpig-search, office; office only in standard
 ```
 
-> ⚠️ **v3 起老格式不兼容**：`preset-caps.json` 必须是 `version:3` 且带 `scope` / `baseline` / `baselineTools`，
-> 每个模式要有 `tools/toolCount/lacks/gains/only/comparisonSummary/suitableFor/notSuitableFor`。
-> 用户覆盖层写成 v1/v2 老格式时 `list: true` 直接回 `preset-caps-invalid`（`stop:false`），**不回退包内默认**，
-> 避免「名册悄悄变成旧的 4 个内置模式」。
+规则：
 
-**默认只含 4 个内置模式**（`standard` / `ptc` / `minimal` / `cordis`），来自包内
-`defaults/preset-caps.json`（2026-11-14 在 DSH 0.2.2-rc.3 上实跑）。名册**不会自动发现**你装的模式 ——
-不在基准文件里的模式不显示，这不是装坏了。
+- 编号 = registry 顺序 × 每个模式自己的工具顺序，首现发号、三位补零，绝不截断。
+- 每模式只列编号区间：**不再有 `(N tools)` 计数，也不再有 suitable / not suitable 两行**。
+- 技能合并成一行；`<skill> only in <模式>` 只列「不是所有 live 模式都持有」的技能。
+- 单模式取不到（`broken` 或 `acquireScope` 抛错）时**仍保留该行**：能用 `preset-caps.json` 回填就回填并标
+  ` [snapshot]`；caps 里也没有该模式则写 `- <id>: — [unknown]`（不许吞行）。
+
+> 兜底：接口缺失时整份名册走静态 `preset-caps.json`（v3：用户文件优先、回退包内 `defaults/`），
+> 每行带 ` [snapshot]`。v1/v2 老格式仍直接回 `preset-caps-invalid`，不回退包内默认。
 
 #### 设置页里的「dsh-blackpig-mode」基准测试页面（v1.0.7，2026-11-15）
 
@@ -328,7 +314,7 @@ BASELINE standard (33 tools) — full tool list:
 
 | 想做的事 | 怎么做 | 效果 |
 | --- | --- | --- |
-| 改描述文字 | 编辑 `preset-caps.json` 里那个模式的 `suitableFor` / `notSuitableFor` | 名册里那两行文字变了 |
+| 改描述文字 | 编辑 `preset-caps.json` 的 `suitableFor` / `notSuitableFor` | **v1.0.10 起名册不再渲染这两行**；字段只留给兜底/兼容，改了不会出现在名册 |
 | 只在名册里不显示 | 该模式加 `"hidden": true` | `list: true` 看不到它；**`delegate` 仍能派给它** |
 | 彻底禁用（不许派） | 黑猪 `cordis.patch.yml` 里 `blackpig-roster` 的 config 加 `disabledPresets: [mode-id]` | `delegate` 回 `preset-disabled`（stop: true） |
 
@@ -592,7 +578,7 @@ DSH 下一版（master，未发版）把委派控制接口改了两件事，任�
 
 ## English summary
 
-`dsh-blackpig-mode` is an agent preset for DeepSeek Harness (DSH). The coordinator agent holds **no hands-on tools**: no file reads, no shell, no web search or fetch. Its read-only verification surface is `file_info` (file kind, existence, byte count), `ls` (directory entry names only, never contents), and `read_image`; the job trio (`job_list` / `job_output` / `job_kill`) was removed from the retain set in v1.0.10 (2026-11-22). None of them can read a source file. All actual work is delegated to subagents through a single required-argument tool, `subagent_preset`.
+`dsh-blackpig-mode` is an agent preset for DeepSeek Harness (DSH). The coordinator agent holds **no hands-on tools**: no file reads, no shell, no web search or fetch. Its read-only verification surface is `file_info` (file kind, existence, byte count; `list: true` lists directory entry names only, never contents) and `read_image`; the job trio (`job_list` / `job_output` / `job_kill`) was removed from the retain set in v1.0.10 (2026-11-22). None of them can read a source file. All actual work is delegated to subagents through a single required-argument tool, `subagent_preset`.
 
 ### Origin
 
