@@ -123,7 +123,7 @@ function Find-PresetDeclaration {
 $expected = [ordered]@{
     'cordis.patch.yml'    = 0   # 不参与严格字节校验（人格随编辑变化；5/5 用段数+needle 断言）
     'guard-v10.mjs'       = 198122   # 2026-11-24：DEFAULT_KEEP 去掉 'ls'（并入 file_info）
-    'blackpig-roster.mjs' = 47759   # 2026-11-24：名册实时派生（acquireScope + tools.view + skills.list）
+    'blackpig-roster.mjs' = 49008   # 2026-11-24：名册实时派生 + 技能行按签名分组
     'subtalk.mjs'         = 58608   # 2026-11-24：描述压缩（send/stop）
     'file-info.mjs'       = 40069   # 2026-11-24：并入 ls（list: true，200 条/8KB，不递归）
     'section-mute.mjs'    = 2537    # 2026-11-24 新增：空文本段遮蔽 harness:source / app:web-surface

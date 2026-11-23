@@ -465,8 +465,9 @@ function renderRows(rows) {
     lines.push(`- ${row.id}: ${compressRuns(nums)}${row.live === true ? '' : ' [snapshot]'}`)
   }
 
-  // 技能：合并成一行，避免每个模式重复一遍。
+  // 技能：总清单（每个名字一次）+ 按签名分组的 only-in 子句（同签名的模式列表只写一次）。
   const skillRows = rows.filter((row) => row?.live === true && Array.isArray(row.skills))
+  const allModes = skillRows.map((row) => row.id)
   const order = []
   const modesOf = new Map()
   for (const row of skillRows) {
@@ -480,12 +481,38 @@ function renderRows(rows) {
     }
   }
   if (order.length > 0) {
-    const only = []
+    const total = allModes.length
+    // 签名 = 出现模式集合；全模式签名不产生子句。
+    const groups = new Map()
     for (const name of order) {
       const modes = modesOf.get(name)
-      if (modes.length < skillRows.length) only.push(`${name} only in ${modes.join(', ')}`)
+      if (modes.length >= total) continue
+      const key = modes.join('\u0000')
+      if (!groups.has(key)) groups.set(key, { modes, names: [] })
+      groups.get(key).names.push(name)
     }
-    lines.push(`skills: ${order.length} installed — ${order.join(', ')}${only.length > 0 ? '; ' + only.join('; ') : ''}`)
+    for (const group of groups.values()) group.names.sort()
+    const ordered = [...groups.values()].sort((a, b) => {
+      if (b.modes.length !== a.modes.length) return b.modes.length - a.modes.length
+      if (a.names[0] < b.names[0]) return -1
+      if (a.names[0] > b.names[0]) return 1
+      return 0
+    })
+    const clauses = []
+    for (const group of ordered) {
+      const modes = group.modes
+      const missing = allModes.filter((mode) => !modes.includes(mode)).sort()
+      // 全模式「减去少数」比逐个列出现模式更短时用 all but。
+      const where = missing.length > 0 && missing.length < modes.length
+        ? 'all but ' + missing.join(', ')
+        : modes.join(', ')
+      if (group.names.length === 1) {
+        clauses.push(`${group.names[0]} only in ${where}`)
+      } else {
+        clauses.push(`${group.names.join(', ')} (${group.names.length}) only in ${where}`)
+      }
+    }
+    lines.push(`skills: ${order.length} installed — ${order.join(', ')}${clauses.length > 0 ? '; ' + clauses.join('; ') : ''}`)
   }
 
   return { text: lines.join('\n'), degraded }
