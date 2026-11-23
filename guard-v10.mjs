@@ -249,7 +249,6 @@ const DEFAULT_KEEP = [
   // `read_image` 保留：它返回图像块、不能进 spill、也不存在"自己调研"的歧义，
   // 而且大脑确实需要看参考图来判断视觉方向。
   'read_image',
-  'working_directory',
   // 只读元数据：字节数 / 类型 / 存在性 / 一次多路径的总和。
   // 它是砍掉 read 之后查「存在性 / 字节数」的手段之一（另有 read_image、job_output），
   // 但只有它能一次查多个路径并给出总字节数，必须在这个保留集里。

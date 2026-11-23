@@ -1,5 +1,56 @@
 # Changelog — dsh-blackpig-mode
 
+## 1.0.10（2026-11-23 原地覆盖；版本号字符串不变，仍是 1.0.10）
+
+> 本节记的是**同一个版本号下的原地覆盖**：`package.json` 的 `version` 保持 `1.0.10`，
+> 只重打 tgz 并覆盖 GitHub Release `v1.0.10` 的资产，不产生 1.0.11。
+> 判断装机版本仍看 `package.json` 的 `version` + 本节日期。
+
+### 2026-11-23 修订（C-1 人格 + 摘 `working_directory`）
+
+**修订 1：人格 18 段 → 17 段（`cordis.patch.yml`）**
+
+- **删 P11 的「超时兜底 5/15 分钟」整句**：那段超时数字属于宿主超时策略该管的事，
+  写进人格只会让模型对「超时多久算异常」另立一套判据。
+- **P18「有状态任务保持模式」并入 P09「默认复用」**：两段讲的是同一件事的两半
+  （复用已有 worker / 别中途换模式），分成两段反而让「什么时候该换」和「换了会怎样」
+  拆在两个地方。合并后仍在同一段里，判据一条不少。
+- 实测口径（同一台机器、同一量法）：人格正文 **18 段 / 9,258 B → 17 段 / 8,348 B**
+  （字符口径 9,200 → 8,292）；`cordis.patch.yml` **35,420 → 34,748 B**（−672）。
+  段落从 L70 起、正文 L70–L102、L103 空行、L104 起 `- id: agent-instructions`。
+- 判据（新措辞必须在、旧措辞必须不在）：`timeout backstop` 全程 **0 命中**；
+  `stateful or interactive` **1 命中**（并入 P09 后仍保留该句）。
+
+**修订 2：`guard-v10.mjs` 的 `DEFAULT_KEEP` 摘掉 `working_directory`**
+
+- **为什么摘**：协调者持有 `working_directory` 就能自己换工作目录，等于给「只判断、
+  不动手」的大脑开了一个能影响**后续所有派活相对路径**的口子——它换一次，
+  队友的默认 cwd 与它的判断基准就错位了。
+- **摘后行为**：协调者不再能自己 `cd`；**相对路径基准固定为会话创建目录**，
+  绝对路径完全不受影响（`file_info` / `ls` / `read_image` 传绝对路径照样能用）。
+- **只动保留集，不动裁剪豁免表**：`:574` 的 `TRIM_EXEMPT_TOOLS` 里那行 `working_directory`
+  **保留**（同 `job_kill` 先例——那是「结果太小不需要裁剪」的表，与「大脑能持有什么」
+  是两套语义；留着它只影响裁剪，不还给大脑任何工具）。
+- 实测：`DEFAULT_KEEP` **25 名 → 24 名**；`guard-v10.mjs` **197,330 → 197,307 B**（−23）。
+  全文件 `working_directory` 剩余命中 **1 处**（`:573`，即上面的裁剪豁免表）；
+  `node --check guard-v10.mjs` exit 0。
+
+**修订 3：README 的保留集数字同步**
+
+- `DEFAULT_KEEP` **28 → 24** 名；扣掉 `extraDeny: [subagent, subagent_fork]` 后可**用 22 个**
+  （原 26）。旧文那句「后台任务 3 个（`job_list` / `job_output` / `job_kill`）」**删除**
+  ——这三个 v1.0.10 首发时已不在保留集，写在那里是把历史值当现状。
+- `verify.ps1` 内置期望表跟着改：`guard-v10.mjs` 197330 → **197307**；
+  `cordis.patch.yml` 期望值本就是 `0`（不参与字节校验），**无需变更**；
+  `package.json` 981 不变（版本号没动）。
+
+**修订 4：这次覆盖顺带钉死打包方式**
+
+- 新 tgz 用 `tools\build-blackpig-tgz.mjs` 打，条目一律带 `package/` 前缀
+  （`package/lib/client.js` / `package/defaults/preset-caps.json` / `package/docs/preset-bench.md`），
+  包根无裸 `client.js` 这类摊平指纹。装完仍须跑一次
+  `tools\dsh-backup\verify-entry-files.mjs` 作双保险。
+
 ## 1.0.9 (2026-11-19)
 
 > **本版本号是当前唯一在装的版本，且**不随修复 bump**。用户明确要求「别搞这么多版本」，

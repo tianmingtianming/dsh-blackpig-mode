@@ -122,7 +122,7 @@ function Find-PresetDeclaration {
 # 维护者改完源码、重新打包后，应把这里更新为 `npm pack` 产物里的实测值。
 $expected = [ordered]@{
     'cordis.patch.yml'    = 0   # 1.0.8 加锚点挂载行后实测回填（v1.0.7 值 33081 已过时）
-    'guard-v10.mjs'       = 197330
+    'guard-v10.mjs'       = 197307   # 1.0.10 原地覆盖（2026-11-23）：DEFAULT_KEEP 摘掉 working_directory（−23 B）
     'blackpig-roster.mjs' = 43179
     'subtalk.mjs'         = 57405   # 1.0.9：目录读法 + 解析回显（resolved note）
     'file-info.mjs'       = 31745

@@ -20,7 +20,7 @@
 
 做完发现一个人生的真谛：**人生的上下文只有这么长，一定要用大部分时间去做自己愿意做的事。**
 
-技术上怎么落到这套代码上：读文件会吃掉上下文，所以把「读」这件事交给 helper——主对话的 `read` 与 `grep` 一起从工具面上摘掉（留 `grep` 等于留半个 `read`，纪律不成立），只保留只读验证工具：`file_info`（查文件类型 / 是否存在 / 字节数）、`ls`（列目录条目名）、`read_image`（看图）与 `job_output`（后台任务原始输出）。这个取舍是有意识的：**代价是规划者看不到文件内容**，想知道里面写了什么，只能靠 brief 再派一个人去看，并要求带回行号和原文；**换来的是上下文不被文件内容吃掉**，主对话只承载结论和判断。所以 brief 必须自包含，验证必须换人做，汇报必须带证据——这三条不是风格要求，是这个交换成立的前提。
+技术上怎么落到这套代码上：读文件会吃掉上下文，所以把「读」这件事交给 helper——主对话的 `read` 与 `grep` 一起从工具面上摘掉（留 `grep` 等于留半个 `read`，纪律不成立），只保留只读验证工具：`file_info`（查文件类型 / 是否存在 / 字节数）、`ls`（列目录条目名）与 `read_image`（看图）；后台任务三件套 `job_list` / `job_output` / `job_kill` 已于 v1.0.10（2026-11-22）一并从保留集摘除，大脑不再能查看后台任务原始输出。这个取舍是有意识的：**代价是规划者看不到文件内容**，想知道里面写了什么，只能靠 brief 再派一个人去看，并要求带回行号和原文；**换来的是上下文不被文件内容吃掉**，主对话只承载结论和判断。所以 brief 必须自包含，验证必须换人做，汇报必须带证据——这三条不是风格要求，是这个交换成立的前提。
 
 发出来只是为了让朋友们装起来方便——不是产品，没有客服，也没有维护承诺。代码里会有粗糙的地方，取舍也带着明显的个人偏好。**能用，但别当作品看。**
 
@@ -36,9 +36,9 @@
 
 | 设计 | 做法 | 约束住的是什么 |
 | --- | --- | --- |
-| 规划者无读取工具 | `guard-v10.mjs` 在大脑自己的 agent scope 上装 `tools.restrict()` + `tools.guard()`，`DEFAULT_KEEP` 共 **28** 个名字，其中 `subagent` / `subagent_fork` 被 `extraDeny` 一票否决（它们留在默认表里只是「撤销 extraDeny 即可恢复」的配置回滚位，**不参与可用计数**），经 `extraDeny` 后**实际可用 26 个**，分七类：核实 2 个（`file_info`（类型/存在性/字节数）、`ls`（只列目录条目名））；看图 1 个（`read_image`）；派活 3 个（`subagent_preset`、`send_to_subagent`、`stop_subagent`）；团队协作 9 个（`spawn_teammate`、`send_message`、`list_agents`、`interrupt_agent`、`wait_agent`、`team_task_create` / `list` / `get` / `update`）；后台任务 3 个（`job_list` / `job_output` / `job_kill`）；长期目标 3 个（`create_goal` / `get_goal` / `update_goal`）；交互与自我管理 4 个（`todo_write`、`present`、`ask_user_question`、`working_directory`）；计划模式条件注册 1 个（`exit_plan_mode`）；**2+1+3+9+3+3+4+1 = 26** | 强制出信息压缩边界：过程数据进不了主对话 |
+| 规划者无读取工具 | `guard-v10.mjs` 在大脑自己的 agent scope 上装 `tools.restrict()` + `tools.guard()`，`DEFAULT_KEEP` 共 **24** 个名字，其中 `subagent` / `subagent_fork` 被 `extraDeny` 一票否决（它们留在默认表里只是「撤销 extraDeny 即可恢复」的配置回滚位，**不参与可用计数**），经 `extraDeny` 后**实际可用 22 个**，分七类：核实 2 个（`file_info`（类型/存在性/字节数）、`ls`（只列目录条目名））；看图 1 个（`read_image`）；派活 3 个（`subagent_preset`、`send_to_subagent`、`stop_subagent`）；团队协作 9 个（`spawn_teammate`、`send_message`、`list_agents`、`interrupt_agent`、`wait_agent`、`team_task_create` / `list` / `get` / `update`）；长期目标 3 个（`create_goal` / `get_goal` / `update_goal`）；交互与自我管理 3 个（`todo_write`、`present`、`ask_user_question`）；计划模式条件注册 1 个（`exit_plan_mode`）；**2+1+3+9+3+3+1 = 22** | 强制出信息压缩边界：过程数据进不了主对话 |
 | brief 必须自包含 | 队友看不到主对话，只看得到 brief。人格与工具描述都要求「点名文件路径、行号、具体改什么」，禁止「按你刚才的发现去修」 | 派活必须先把信息压成一份可执行的说明书 |
-| 验证必须独立 | 主对话只剩 `file_info` / `ls` / `read_image` / `job_output`：`ls` 列有哪些名字、`file_info` 验大小与存在性、`read_image` 看图、`job_output` 看后台任务原始输出；全都证明不了「文件里写了什么」。要问内容，只能再派一个人去看 | 自己验自己会互相印证错误；独立验证要求换人 |
+| 验证必须独立 | 主对话只剩 `file_info` / `ls` / `read_image`：`ls` 列有哪些名字、`file_info` 验大小与存在性、`read_image` 看图；`job_output` 自 v1.0.10（2026-11-22）起已不在保留集；三者全都证明不了「文件里写了什么」。要问内容，只能再派一个人去看 | 自己验自己会互相印证错误；独立验证要求换人 |
 | 汇报必须带证据 | 大脑在派活的 brief 里要求回报四段：结论 / 依据（路径+行号、命令+输出、SHA256 或计数）/ 范围与限制 / 不确定。缺依据的结论，主对话不得转述为事实 | 防止把推测升级成事实汇报给用户 |
 
 派活只有一个入口：`subagent_preset`（由 `blackpig-roster.mjs` 注册），`preset` 参数必填，无默认值。`subagent` / `subagent_fork` 在主对话上被 `extraDeny` 摘掉——因为前者会固定回落到 `agentPreset: "standard"`，后者压根不支持选模式，两条旧路径都会让活派错人且**不报错**。
@@ -592,7 +592,7 @@ DSH 下一版（master，未发版）把委派控制接口改了两件事，任�
 
 ## English summary
 
-`dsh-blackpig-mode` is an agent preset for DeepSeek Harness (DSH). The coordinator agent holds **no hands-on tools**: no file reads, no shell, no web search or fetch. Its read-only verification surface is `file_info` (file kind, existence, byte count), `ls` (directory entry names only, never contents), `read_image`, and `job_output` (raw output of a background job); none of them can read a source file. All actual work is delegated to subagents through a single required-argument tool, `subagent_preset`.
+`dsh-blackpig-mode` is an agent preset for DeepSeek Harness (DSH). The coordinator agent holds **no hands-on tools**: no file reads, no shell, no web search or fetch. Its read-only verification surface is `file_info` (file kind, existence, byte count), `ls` (directory entry names only, never contents), and `read_image`; the job trio (`job_list` / `job_output` / `job_kill`) was removed from the retain set in v1.0.10 (2026-11-22). None of them can read a source file. All actual work is delegated to subagents through a single required-argument tool, `subagent_preset`.
 
 ### Origin
 
@@ -628,4 +628,3 @@ Built with heavy reference to **`dsh-multitask@1.2.25`**, a **third-party commun
 
 MIT，见 [LICENSE](LICENSE)。5 个 `.mjs` 插件与人格文本来自作者的本地 DSH 部署，随包原样分发。
 > 无记忆接手本插件：仓库根有 `COLD-START-HANDOFF.md`（**不在 npm 包内**，只在 GitHub 仓库里）；装包后请到仓库查看。
-> ⚠️ 该交接文档定稿于 **v1.0.4（2026-11-08）**，其版本号/字节数/工具数量等「当前状态」数字**已过期**，仅架构、术语、红线、rc.1→master 风险部分仍有效；现状以源码实测为准。
