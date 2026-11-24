@@ -122,14 +122,13 @@ function Find-PresetDeclaration {
 # 维护者改完源码、重新打包后，应把这里更新为 `npm pack` 产物里的实测值。
 $expected = [ordered]@{
     'cordis.patch.yml'    = 0   # 不参与严格字节校验（人格随编辑变化；5/5 用段数+needle 断言）
-    'guard-v10.mjs'       = 193023   # 2026-11-24：DEFAULT_KEEP 去掉 'ls'（并入 file_info）
-    'blackpig-roster.mjs' = 38943   # 2026-11-24 r4：技能编号（Skill index + 模式行 | s[…]）
-    'subtalk.mjs'         = 58663   # 2026-11-24：描述压缩（send/stop）
-    'file-info.mjs'       = 40070   # 2026-11-24：并入 ls（list: true，200 条/8KB，不递归）
+    'guard-v10.mjs'       = 192713   # 2026-11-24：DEFAULT_KEEP 删 wait_agent + 相关死提示
+    'blackpig-roster.mjs' = 46944   # 2026-11-24：subagent_preset 描述保守精简
+    'subtalk.mjs'         = 57920   # 2026-11-24：send/stop 描述保守精简
+    'file-info.mjs'       = 39726   # 2026-11-24：描述保守精简（list:true/8192B 保留）
     'section-mute.mjs'    = 2537    # 2026-11-24 新增：空文本段遮蔽 harness:source / app:web-surface
     'compat.mjs'          = 57537   # 2026-11-24：applyToTools 的 agent 描述压缩
-    'package.json'        =  736   # 1.0.10（未 bump）：files[] 12 项
-    'blackpig-anchor.mjs' = 33296  # 1.0.9 二次修订：名册显示策略（按 N 分档 + 状态标记 + key 含 activity）
+    'package.json'        =  709   # 1.0.10（未 bump）：files[] 11 项（删 blackpig-anchor.mjs）
     'README.md'           = 60733   # 记录值；仍在 skipSizeCheck（随文档编辑变化）
     'CHANGELOG.md'        = 23551   # 记录值；仍在 skipSizeCheck（随文档编辑变化）
     'LICENSE'             = 1073
@@ -149,12 +148,13 @@ $expected = [ordered]@{
 # 注意：不要改用 SHA256 —— 换行符口径一变、或副本落后一个版本，SHA 同样对不上。
 $skipSizeCheck = @('README.md', 'CHANGELOG.md', 'cordis.patch.yml', 'check.ps1', 'verify.ps1')
 
-# ── 脚本来源布局判定（1.0.8）───────────────────────────────────────────────
-# v1.0.8 起新增 blackpig-anchor.mjs / CHANGELOG.md。脚本目录若含它们，说明脚本
-# 来自 1.0.8 构建目录；此时装机副本（可能仍是 1.0.7）缺这两个新文件属「新版未装」
-# 而非包损坏，1/5 据此降级为 OK。必须在 1/5 之前赋值（1/5 的分支要读它）。
+# ── 脚本来源布局判定（2026-11-24：锚点下架后重键）──────────────────────────
+# 原判据用 blackpig-anchor.mjs + CHANGELOG.md 判断「脚本来自新构建目录」；锚点模块
+# 已于 2026-11-24 下架、文件删除，故改键为 CHANGELOG.md + compat.mjs（两者都是
+# 1.0.8+ 才有的文件，且本次未删）。装机副本缺这些新文件仍属「新版未装」而非包损坏，
+# 1/5 据此降级为 OK。必须在 1/5 之前赋值（1/5 的分支要读它）。
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
-$isNewBuildLayout = (Test-Path -LiteralPath (Join-Path $scriptDir 'blackpig-anchor.mjs')) -and (Test-Path -LiteralPath (Join-Path $scriptDir 'CHANGELOG.md'))
+$isNewBuildLayout = (Test-Path -LiteralPath (Join-Path $scriptDir 'compat.mjs')) -and (Test-Path -LiteralPath (Join-Path $scriptDir 'CHANGELOG.md'))
 
 $dshHome    = Get-DshHome
 $profileDir = Join-Path (Join-Path $dshHome 'profiles') $Profile
@@ -272,7 +272,7 @@ if (-not (Test-Path -LiteralPath $pkgDir -PathType Container)) {
         # 脚本自身属于 1.0.8 新布局（脚本目录含新文件），而装机副本还是 1.0.7：
         # 新文件缺失属「未装新版」，不是包损坏。降级为提示，不计 FAIL；
         # 其余应到文件的齐全性已在上面逐个核对。
-        Write-Output '       [INFO] 装机副本缺 1.0.8 新文件（blackpig-anchor.mjs / CHANGELOG.md）——本脚本来自 1.0.8 构建目录，属「新版未装」状态，非包损坏；装完 1.0.8 后复跑本脚本应为 0 缺件'
+        Write-Output '       [INFO] 装机副本缺 1.0.8+ 新文件（compat.mjs / CHANGELOG.md）——本脚本来自新构建目录，属「新版未装」状态，非包损坏；装完后复跑本脚本应为 0 缺件'
     }
     if ($missing -gt 0 -and -not $isNewBuildLayout) { [void]$script:verdicts.Add('包文件不完整') }
     if ($sizeBad -gt 0 -and $StrictSizes) { [void]$script:verdicts.Add('包文件字节数与内置参考值不符（-StrictSizes）') }
@@ -703,7 +703,7 @@ $personaNeedles = @(
     'childSessionId'
     'a second send runs the brief twice'
     'targetState=finished'
-    'takes no target'
+    'A completion notice arrives on its own'
     'ask_user_question'
     '>=2'
     'no usable subagent exists'

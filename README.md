@@ -36,12 +36,14 @@
 
 | 设计 | 做法 | 约束住的是什么 |
 | --- | --- | --- |
-| 规划者无读取工具 | `guard-v10.mjs` 在大脑自己的 agent scope 上装 `tools.restrict()` + `tools.guard()`，`DEFAULT_KEEP` 共 **23** 个名字，其中 `subagent` / `subagent_fork` 被 `extraDeny` 一票否决（它们留在默认表里只是「撤销 extraDeny 即可恢复」的配置回滚位，**不参与可用计数**），经 `extraDeny` 后**实际可用 21 个**，分七类：核实 1 个（`file_info`：类型/存在性/字节数；`list: true` 列目录条目名）；看图 1 个（`read_image`）；派活 3 个（`subagent_preset`、`send_to_subagent`、`stop_subagent`）；团队协作 9 个（`spawn_teammate`、`send_message`、`list_agents`、`interrupt_agent`、`wait_agent`、`team_task_create` / `list` / `get` / `update`）；长期目标 3 个（`create_goal` / `get_goal` / `update_goal`）；交互与自我管理 3 个（`todo_write`、`present`、`ask_user_question`）；计划模式条件注册 1 个（`exit_plan_mode`）；**1+1+3+9+3+3+1 = 21** | 强制出信息压缩边界：过程数据进不了主对话 |
+| 规划者无读取工具 | `guard-v10.mjs` 在大脑自己的 agent scope 上装 `tools.restrict()` + `tools.guard()`，`DEFAULT_KEEP` 共 **21** 个名字，其中 `subagent` / `subagent_fork` 被 `extraDeny` 一票否决（它们留在默认表里只是「撤销 extraDeny 即可恢复」的配置回滚位，**不参与可用计数**），经 `extraDeny` 后**实际可用 19 个**，分七类：核实 1 个（`file_info`：类型/存在性/字节数；`list: true` 列目录条目名）；看图 1 个（`read_image`）；派活 3 个（`subagent_preset`、`send_to_subagent`、`stop_subagent`）；团队协作 7 个（`send_message`、`list_agents`、`interrupt_agent`、`team_task_create` / `list` / `get` / `update`；`spawn_teammate` / `wait_agent` 已于 2026-11-24 从保留集删除——后者只等自己收件箱的输入、无 target、不能替代完成通知）；长期目标 3 个（`create_goal` / `get_goal` / `update_goal`）；交互与自我管理 3 个（`todo_write`、`present`、`ask_user_question`）；计划模式条件注册 1 个（`exit_plan_mode`）；**1+1+3+7+3+3+1 = 19** | 强制出信息压缩边界：过程数据进不了主对话 |
 | brief 必须自包含 | 队友看不到主对话，只看得到 brief。人格与工具描述都要求「点名文件路径、行号、具体改什么」，禁止「按你刚才的发现去修」 | 派活必须先把信息压成一份可执行的说明书 |
 | 验证必须独立 | 主对话只剩 `file_info` / `read_image`：`file_info` 列有哪些名字（`list: true`）并验大小与存在性、`read_image` 看图；`job_output` 自 v1.0.10（2026-11-22）起已不在保留集；三者全都证明不了「文件里写了什么」。要问内容，只能再派一个人去看 | 自己验自己会互相印证错误；独立验证要求换人 |
 | 汇报必须带证据 | 大脑在派活的 brief 里要求回报四段：结论 / 依据（路径+行号、命令+输出、SHA256 或计数）/ 范围与限制 / 不确定。缺依据的结论，主对话不得转述为事实 | 防止把推测升级成事实汇报给用户 |
 
-派活只有一个入口：`subagent_preset`（由 `blackpig-roster.mjs` 注册），`preset` 参数必填，无默认值。`subagent` / `subagent_fork` 在主对话上被 `extraDeny` 摘掉——因为前者会固定回落到 `agentPreset: "standard"`，后者压根不支持选模式，两条旧路径都会让活派错人且**不报错**。
+派活只有一个入口：`subagent_preset`（由 `blackpig-roster.mjs` 注册），`preset` 参数必填，无默认值。当本会话已有可续（`continuable`）worker 时，还必须显式二选一：`reuseId`（冷恢复既有 worker，不新建）或 `fresh: true`（明确新开）；都不传会被拒并回 ≤3 个候选（候选只在被拒时出现，正常路径零新增 token）。没有可续 worker 时无需传这两个参数。`subagent` / `subagent_fork` 在主对话上被 `extraDeny` 摘掉——因为前者会固定回落到 `agentPreset: "standard"`，后者压根不支持选模式，两条旧路径都会让活派错人且**不报错**。
+
+锚点提醒模块的 L2/L3/L3+ 每轮/周期机器注入已于 2026-11-24 下架（`blackpig-anchor.mjs` 删除），复用纪律改由上面的工具侧硬判据强制；L1 静态人格句 `**Reuse by default.**` 保留。
 
 另一条路是 Agent Teams 的 `spawn_teammate`（只有你的工具表里真有它，才说明团队插件开着）。它和 `subagent_preset` 的区别要说清：**`spawn_teammate` 没有 `preset` 参数**，队友永远继承父会话自己的模式，你没法把它指到别的模式；**但它拿得到该 preset 的完整工具面，确实能干活**（结构性例外：guard 摘掉 `spawn_teammate`、subtalk 摘掉 `stop_subagent`，见下），不是二传手。所以分工是：活需要「某个特定模式」→ `subagent_preset`；活需要「多轮协作、中途纠偏、两个帮手要对表」→ 队友。
 
@@ -193,7 +195,7 @@ preset id 固定是 `blackpigmodel`，不能两个 bundle 各声明一次。会�
 
 ## 文件说明
 
-14 个文件（无子目录；r5 删 `lib/client.js`、r6 删 `defaults/` 与 `docs/` 两个文件），一句话一个（其中三个不参与字节校验，见下）：
+13 个文件（无子目录；r5 删 `lib/client.js`、r6 删 `defaults/` 与 `docs/` 两个文件，2026-11-24 删 `blackpig-anchor.mjs`），一句话一个（其中三个不参与字节校验，见下）：
 
 | 文件 | 作用 |
 | --- | --- |

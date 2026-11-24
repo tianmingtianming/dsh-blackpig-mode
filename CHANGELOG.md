@@ -1,5 +1,21 @@
 # Changelog — dsh-blackpig-mode
 
+## 2026-11-24 追加（版本号不 bump，仍 1.0.10）：可控工具描述保守精简
+
+- 只精简黑猪自注册的 4 个工具描述，防误用语义全保留：`subagent_preset` 963→895 B（保留先 list:true、按能力区间选、reuseId/fresh 判据原文不动）、`send_to_subagent` 1064→651 B（保留 messageId 只证明入队、interruptVerified=false、下一轮投递）、`stop_subagent` 634→483 B（保留 send_to_subagent 先请求 interrupt）、`file_info` 846→541 B（保留 list:true 与 200 条/8192 B 上限）。
+- 合计省 **937 B ≈234 token**；宿主工具描述零改动。`verify.ps1` 期望字节同步（roster 46944 / subtalk 57920 / file-info 39726，BOM 已补回）。
+
+## 2026-11-24 追加（版本号不 bump，仍 1.0.10）：删除 wait_agent
+
+- **从大脑工具面删除 `wait_agent`**：`guard-v10.mjs` 的 `DEFAULT_KEEP`/`TRIM_EXEMPT_TOOLS`/`TEAM_ONLY_TOOLS` 各删一处；该工具只等自己收件箱输入、无 target、不能替代完成通知，属误导面。`DEFAULT_KEEP` 21 名（删前 22）、扣 extraDeny 后可用 19（删前 20）。
+- **清理死提示**：guard 轮询闸门的 team 分支不再说「要等队友就调用一次 wait_agent」，改为等结算通知自动到；`blackpig-roster.mjs` 派活回执、`subtalk.mjs` stop 回执删 wait_agent 误导线；人格（cordis.patch.yml:80）那条禁令改为通用表述「结算通知自动唤醒、派出即报即停」。`compat.mjs` 里的 wait_agent 仅作宿主版本探测参考（不作判据），保留。README 工具计数同步。
+
+## 2026-11-24 追加（版本号不 bump，仍 1.0.10）：可续 worker 硬判据 + 锚点注入下架
+
+- **`subagent_preset` 复用硬判据**：存在 `mode==='continuable'` 的直接子会话时，`delegate` 要求显式二选一——`reuseId`（冷恢复，`compat.callSendMessage`，不新建）或 `fresh:true`（新开）；都不传 → `reusable-worker-exists` + ≤3 候选（仅拒时回，正常路径零新增 token）。名册走 durable catalog 投影，不进每轮上下文；不判 desc 相似。schema +`reuseId`/+`fresh`（4→6 参数，工具定义 ≈+705 B ≈176 token）。
+- **锚点注入层下架**：删除 `blackpig-anchor.mjs` 与 `cordis.patch.yml` 挂载行，L2/L3/L3+ 每轮/周期机器注入全部停止；保留 L1 静态人格句 `**Reuse by default.**`。`package.json files[]` 去该文件，`verify.ps1` 期望表/布局判据同步（section-mute 未动）。
+- 验证：`dsh-verify` 改前改后均 PASS/exit 0（零差异）；包内 `verify.ps1` 0/5–5/5 全 OK、exit 0。
+
 ## 1.0.10（2026-11-23～2026-11-24 原地覆盖；版本号字符串不变，仍是 1.0.10）
 
 > 本节记的是**同一个版本号下的原地覆盖**：`package.json` 的 `version` 保持 `1.0.10`，

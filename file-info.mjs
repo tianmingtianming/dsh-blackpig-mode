@@ -787,15 +787,12 @@ export function apply(ctx, config) {
     ctx.tools.register({
       name: TOOL_NAME,
       description:
-        'Report read-only metadata (byte count, kind) for one or more paths, or list a directory. ' +
-        'Default mode reports one entry per requested path: a regular file reports its byte count, or an explicit ' +
-        'unknown-size marker when the backend provides none (never a fabricated 0); a directory is reported as a ' +
-        'directory without a byte count; a missing or uninspectable path is reported as such and never as 0 bytes. ' +
-        'With `list: true`, pass one `path` and get its immediate entries (name, dir or file, bytes): names only, ' +
-        'never content, never recursion. Listing output is capped at 200 entries / 8192 bytes and truncated with ' +
-        'the total. `recursive` is reserved and never recurses. The totals field sums the known byte counts. ' +
-        'Use this instead of shell commands to measure sizes or discover names; nothing is read into the ' +
-        'conversation and nothing is modified.',
+        'Read-only metadata (byte count, kind) for paths, or list a directory. Default: one entry per path — ' +
+        'file → byte count (or explicit unknown-size marker, never a fabricated 0); directory → marked as such; ' +
+        'missing/uninspectable → reported, never as 0. With `list: true`, pass one `path`; get immediate entries ' +
+        '(name, dir/file, bytes) — names only, never content, never recursion; capped at 200 entries / 8192 bytes, ' +
+        'truncated with a total. `recursive` is reserved and never recurses. Nothing is read into the conversation ' +
+        'or modified.',
       parameters: PARAMETERS,
       output: {
         schema: OUTPUT_SCHEMA,

@@ -592,18 +592,13 @@ export function apply(ctx, config) {
     ctx.tools.register({
       name: TOOL_NAME,
       description:
-        'Send a follow-up message to a worker you delegated in this mode with `subagent_preset`. Use ' +
-        'the `childSessionId` that delegation returned as `agent_id`. Available to the coordinator ' +
-        'and any delegating agent. You can message any member of your subagent tree — children, ' +
-        'grandchildren, the root. WHAT THE RETURN VALUE PROVES: `messageId` is the host\'s admission ' +
-        'receipt — the message is in the child\'s inbox. Nothing here proves the child has STOPPED or ' +
-        'READ it. With `interrupt=true` a cancel request is also handed to the host; the host exposes ' +
-        'no receipt for that, so the result says `interruptRequested=true` and ' +
-        '`interruptVerified=false`. Treat it as a request, not as confirmation the child stopped. ' +
-        'TIMING: if the child is running when it is interrupted, the host delivers this message at ' +
-        'the child\'s NEXT TURN, not at the nearest step boundary — so the action already in flight ' +
-        'may still complete before your correction is read. Never assume the correction landed ahead ' +
-        'of that action. Team members are NOT addressed here; use `send_message` for those.',
+        'Follow-up to a worker delegated via `subagent_preset`; pass its `childSessionId` as `agent_id`. ' +
+        'Any member of your subagent tree (children, grandchildren, root) is addressable. ' +
+        'WHAT THE RETURN PROVES: `messageId` = host admission only — the message is in the inbox, ' +
+        'NOT that the child stopped or read it. `interrupt=true` hands a cancel request to the host ' +
+        '(no receipt): `interruptRequested=true` / `interruptVerified=false` means requested, not confirmed. ' +
+        'TIMING: an interrupted running child receives this at its NEXT TURN, not the step boundary — ' +
+        'the in-flight action may finish before your correction is read. Team members: use `send_message`.',
       // ⚠️ 2026-11-06 通用化：目标参数改成「两种名字都收」。
       //   · 旧宿主（rc.1 及以前）只有 agent_id（会话 id）；
       //   · 新宿主（master，预计 rc.2）改叫 agent 且语义变成**名字**。
@@ -854,14 +849,12 @@ export function apply(ctx, config) {
     ctx.tools.register({
       name: INTERRUPT_TOOL_NAME,
       description:
-        'Stop the current turn of a worker you delegated in this mode with `subagent_preset`, keeping ' +
-        'its inbox and any descendants intact. COORDINATOR-ONLY: a delegated child cannot use this. ' +
-        'WHAT THIS CANNOT DO: confirm the stop. The host returns nothing, and an interrupt of an ' +
-        'unknown or already-ended target is a silent no-op — hence `stopRequested` + ' +
-        '`verified=false`, never a claim it stopped. It checks whether the target exists first and ' +
-        'refuses instead of faking success. Normally you do not need this: `send_to_subagent` ' +
-        'requests an interrupt before it delivers. Use it when you want the child to stop WITHOUT ' +
-        'sending it anything.',
+        'Stop the current turn of a worker delegated via `subagent_preset`, keeping its inbox and ' +
+        'descendants intact. COORDINATOR-ONLY. CANNOT confirm the stop: the host returns nothing and ' +
+        'an unknown/ended target is a silent no-op, so `stopRequested` + `verified=false` is never a ' +
+        'claim it stopped; it checks existence first and refuses rather than faking success. ' +
+        '`send_to_subagent` already requests an interrupt before delivering; use this only to stop ' +
+        'a child WITHOUT sending it anything.',
       // 同 send_to_subagent：两种名字都收，由 compat.applyToTools 统一算 required。
       parameters: applyToTools({
         type: 'object',
@@ -1022,8 +1015,8 @@ export function apply(ctx, config) {
           detail:
             'the cancel request was handed to the host; it issues no receipt, so whether the child has ' +
             'observed the signal is unverified — this result is the only evidence you get. This worker is a ' +
-            'continuable subagent, not a teammate: `list_agents` lists it, and `wait_agent` watches only your own inbox, so its result says nothing about this worker\'s progress. ' +
-            'Do not confirm its state with them. Judge it from a `send_to_subagent` reply (`targetState`) or from the ' +
+            'continuable subagent, not a teammate: `list_agents` lists it but its rows say nothing about this worker\'s progress. ' +
+            'Judge it from a `send_to_subagent` reply (`targetState`) or from the ' +
             'host\'s completion notice.',
         }
       },

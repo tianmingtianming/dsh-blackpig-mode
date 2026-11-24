@@ -77,7 +77,7 @@
 
               **Reuse by default.** A settled or errored subagent cold-resumes with its whole history; re-spawning throws away the expensive part — one that read a long file or grepped a wide tree holds a picture you cannot cheaply rebuild. Spawn fresh only when the cause is structural, the job needs a different mode, or verification must be independent; a transient failure (rate limit, network, timeout) is not a reason. Reuse also replays the log: switch once its reports show forgotten conclusions or no remaining overlap. **Never change a subagent's mode or skill set mid-stream; a stateful or interactive job keeps its mode and its subagent** to the end. **A finished target is not a failed send**: `send_to_subagent` returning `ok: true`, a `messageId` and `targetState=finished` means the worker had left the live registry (unloaded, not idle) while still in your child catalog, and the receipt returns only after the host restored it and admitted the message — never resend, a second send runs the brief twice. `list_agents` still shows it: `running` is the cold resume, `inactive` is not failure, and no row tells a finished worker from one that never started. Only a completion notice, or a later `send_to_subagent` receipt whose `targetState` you compare with what you last knew, proves anything.
 
-              **Launch, tell the user, end your turn.** Keep one `todo_write` entry per subagent you have outstanding. `wait_agent` cannot stand in for a completion notice: it takes no target, so you cannot wait for a particular worker; Report only what a subagent actually gave you and never upgrade an unverified claim into a fact you state to the user; never call a subagent stalled without evidence — a slow one is usually generating tokens; stopping it discards work. **A batch reports once, after all of it returns.** With >=2 dispatched together, no single return triggers a report: post at most one progress line in flight, then give exactly one final report with per-claim source attribution; if earlier messages conflict with later ones, note the reason in one clause there only, never narrating the evolution. "All returned" means every dispatched subagent came back — a report or an error both count (mark an error as "agent-X failed"); one progress line per child, two together when there are more than five. With a single subagent, report as usual.
+              **Launch, tell the user, end your turn.** Keep one `todo_write` entry per subagent you have outstanding. A completion notice arrives on its own when a worker settles — end your turn and let it wake you; do not poll for a particular worker's progress. Report only what a subagent actually gave you and never upgrade an unverified claim into a fact you state to the user; never call a subagent stalled without evidence — a slow one is usually generating tokens; stopping it discards work. **A batch reports once, after all of it returns.** With >=2 dispatched together, no single return triggers a report: post at most one progress line in flight, then give exactly one final report with per-claim source attribution; if earlier messages conflict with later ones, note the reason in one clause there only, never narrating the evolution. "All returned" means every dispatched subagent came back — a report or an error both count (mark an error as "agent-X failed"); one progress line per child, two together when there are more than five. With a single subagent, report as usual.
 
               **Money and confusion go to the user.** Ask before anything paid — a paid retry needs a second confirmation — and whenever you genuinely cannot tell which mode fits. A subagent that reports itself stuck is a signal to change approach; never fabricate or predict a subagent's result.
 
@@ -275,18 +275,13 @@
           # 换部署仍成立：它读的是宿主契约（schema 文案 + maxFiles 配置项），不是本机状态。
           config:
             maxFiles: 4
-        # ── ★ 锚点提醒（2026-11-19，1.0.8 新增）──
+        # ── 锚点提醒已下架（2026-11-24）──
         #
-        # 长会话大脑忘记复用（设计稿 docs\blackpig-anchor-reminder-design.md v5）。
-        # 三层机器注入，全部 user 侧末尾追加，绝不碰 system 节点：
-        #   · L2 事件窗口：失败通知/限流恢复后 5 轮，固定 R1→artifact→R1；
-        #   · L3 周期锚定：每 50 轮一条，R1/R2/R3 轮流；
-        #   · L3+ 名册最小可见化：名册变化时注一次 ≤80 token 短名册。
-        # 无任何开关（设计原则：配置面越少越可靠）；inject = ['agents']（pre-step
-        # 的 payload 自带 agent，subagents 服务运行期 ctx.get 现取——避免绑死就绪时机，
-        # 与 subtalk.mjs:105 的同一取向）。
-        - id: blackpig-anchor
-          name: "dsh-blackpig-mode/blackpig-anchor.mjs"
+        # 原 blackpig-anchor.mjs 的 L2/L3/L3+ 每轮/周期机器注入已整体删除：
+        # 复用纪律改由 subagent_preset 的工具侧硬判据（reuseId / fresh 二选一）强制，
+        # 不再靠「当轮往上下文末尾塞提醒」这种自证式软手段。
+        # L1 静态人格句（Reuse by default，见上方 persona.prefix）保留——它是静态段、
+        # 不是注入。设计稿 docs\blackpig-anchor-reminder-design.md 仅为历史，勿据此复活。
         # ── ★ 跨模式派活 + 名册（2026-10-31）──
         #
         # ⚠️ 2026-11-02 更正：**这个顺序其实无关紧要**（下面这段旧注释描述的是
@@ -360,7 +355,7 @@
               # ── 第三方工具名已全部移除（2026-11-03，发布通用化）──
               # 本包不写死任何第三方工具名（例如记忆插件的 mnemon_* 17 个）。
               # 要让大脑持有某个第三方工具：把精确工具名加进本表（不支持通配）。
-              # ── 团队协作工具（spawn_teammate / wait_agent / team_task_*）已在
+              # ── 团队协作工具（spawn_teammate / team_task_*）已在
               #   DEFAULT_KEEP 里，无需在此重复；本表只列本部署要额外放行的
               #   工具。团队插件关掉时这些名字本来就不存在，见 guard-v10.mjs
               #   的 DEFAULT_KEEP 名单。

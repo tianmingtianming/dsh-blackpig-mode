@@ -11,8 +11,18 @@
  *
  * 派活（`delegate`）仍然走**活校验**：`registry.list()` 确认目标模式真实存在且没坏。
  *
+ * ── 2026-11-24：可续 worker 复用硬判据 ──────────────────────────────────────
+ * 当调用方存在 `mode === 'continuable'` 的直接子会话时，`delegate` 要求**显式二选一**：
+ *   · `reuseId` —— 冷恢复既有 worker（走 compat.callSendMessage，不新建子会话）；
+ *   · `fresh: true` —— 明确新开。
+ * 两者都不传 → 结构化拒绝 `reusable-worker-exists`，只在被拒时附带 ≤3 个候选，
+ * 正常路径零新增 token。名册来自 durable catalog 投影（compat.readCallerChildCatalog），
+ * 不进每轮上下文、不判断 desc 相似（避开 I7：上下文重叠 ≠ 任务相似；I3 验证新实例例外）。
+ *
  * @module blackpig-model/blackpig-roster
  */
+
+import { callSendMessage, readCallerChildCatalog, resolveTargetId } from './compat.mjs'
 
 
 /** Cordis 插件名，用于 loader 诊断。 */
@@ -580,6 +590,44 @@ export function apply(ctx, config) {
   })
 
   /**
+   * 取调用方（sender）自己的 durable 子会话目录里的**可续** worker（mode === 'continuable'）。
+   *
+   * 数据源 = compat.readCallerChildCatalog()：主路径 sessionQuery.subagentCatalog 投影，
+   * 退路 subagents.listDescendants()。这是**客观名册**，只在此刻的调用里读取，不进
+   * 每轮上下文、不缓存进模型上下文。读不到（searched:false）时返回 null —— 与
+   * 「名册为空」区分：读不到时不施加硬判据（宁可漏拦，不可把查询故障变成拒活）。
+   *
+   * @param sender - 调用方 agent。
+   * @param signal - 取消信号。
+   * @returns {Promise<Array|null>} 可续 worker 行数组（可能空）；null = 目录读不到。
+   */
+  const reusableChildrenOf = async (sender, signal) => {
+    let sub
+    try {
+      sub = ctx.get?.('subagents')
+    } catch {
+      sub = undefined
+    }
+    const catalog = await readCallerChildCatalog(ctx, sub, sender, signal)
+    if (catalog.searched !== true) return null
+    return catalog.rows.filter((row) => row?.mode === 'continuable')
+  }
+
+  /**
+   * 把可续 worker 渲染成 ≤3 个候选（只在拒绝回执里出现，正常路径零 token）。
+   *
+   * 每行给 id / name / mode，模型可直接复制完整 id 作 reuseId。
+   *
+   * @param rows - 可续 worker 行。
+   * @returns {string[]}
+   */
+  const renderReuseCandidates = (rows) =>
+    rows.slice(0, 3).map((row) => {
+      const name = typeof row.name === 'string' && row.name !== '' ? `${row.name} = ` : ''
+      return `${name}${row.id} [${row.mode}]`
+    })
+
+  /**
    * 派活给某个模式。
    *
    * @param args - 工具参数。
@@ -612,6 +660,110 @@ export function apply(ctx, config) {
     const parent = exec?.agent
     if (parent === undefined || parent === null) {
       return failure('no-caller', NO_CALLER_MESSAGE, { stop: true })
+    }
+
+    // ── 2026-11-24：可续 worker 复用硬判据（客观名册，二选一）──────────────────
+    // 名册来自 durable catalog 投影，不进每轮上下文。只在检测到**存在可续 worker**时
+    // 才要求显式选择；没有可续 worker 时保持原行为，零 friction。绝不判断 desc 相似
+    // （I7：上下文重叠 ≠ 任务相似；I3：验证必须独立——新实例正好用来独立核对）。
+    const reusable = await reusableChildrenOf(parent, exec?.signal)
+    if (reusable !== null && reusable.length > 0) {
+      const reuseId = typeof args?.reuseId === 'string' ? args.reuseId.trim() : ''
+      const fresh = args?.fresh === true
+      const hasReuse = reuseId !== ''
+      const hasFresh = fresh
+
+      // 两者都不传 → 硬拒；只在此刻回 ≤3 个候选（正常路径零 token）。
+      if (!hasReuse && !hasFresh) {
+        return failure(
+          'reusable-worker-exists',
+          `${reusable.length} reusable worker(s) exist in this conversation. Choose explicitly: pass ` +
+            '`reuseId` (full childSessionId or unique prefix) to cold-resume one, or `fresh: true` to start a new worker. ' +
+            'Candidates (copy a full id into reuseId): ' + renderReuseCandidates(reusable).join(', ') + '. ' +
+            'No choice was made, so nothing was dispatched.',
+          { stop: true, degraded: ['reuse-choice-required'] },
+        )
+      }
+      // 两者都传 → 同样拒绝（不猜用户意图）。
+      if (hasReuse && hasFresh) {
+        return failure(
+          'reuse-choice-conflict',
+          'Pass either `reuseId` or `fresh: true`, not both.',
+          { stop: true },
+        )
+      }
+
+      if (hasReuse) {
+        // 冷恢复：解析 reuseId（完整 id 直通 / 唯一前缀命中），再走 compat.callSendMessage
+        // 把 brief 投递进既有 worker 的新一轮——绝不新建子会话。
+        const sub = serviceOf('subagents')
+        if (sub === undefined || typeof sub.sendMessage !== 'function') {
+          return failure('subagents-unavailable', 'The subagents service is unavailable, so no worker can be resumed.', { stop: true })
+        }
+        const knownIds = new Set(reusable.map((row) => row.id))
+        let resolved
+        try {
+          resolved = await resolveTargetId(ctx, reuseId, {
+            sub,
+            sender: parent,
+            signal: exec?.signal,
+            isKnownId: async (candidate) => knownIds.has(candidate),
+            logger: ctx.logger,
+          })
+        } catch (error) {
+          return failure(
+            'reuse-id-unresolved',
+            `reuseId ${JSON.stringify(reuseId)} could not be resolved to one of your reusable workers: ` +
+              (error instanceof Error ? error.message : String(error)),
+            { stop: true, degraded: ['reuse-id-unresolved'] },
+          )
+        }
+        // 解析结果必须仍是可续 worker 之一（防止名字解析到别的子会话）。
+        if (!knownIds.has(resolved.id)) {
+          return failure(
+            'reuse-id-unresolved',
+            `reuseId resolved to ${resolved.id}, which is not a reusable worker of this conversation.`,
+            { stop: true },
+          )
+        }
+        try {
+          const sent = await callSendMessage(ctx, {
+            target: reuseId,
+            resolvedId: resolved.id,
+            resolvedBy: resolved.how,
+            resolutionNote: resolved.note,
+            message: prompt,
+            sender: parent,
+            signal: exec?.signal,
+            sub,
+            logger: ctx.logger,
+          })
+          if (sent?.ok === false || typeof sent?.messageId !== 'string' || sent.messageId === '') {
+            return failure(
+              'reuse-send-failed',
+              'The worker was resolved but the resume message could not be confirmed: ' + (sent?.message ?? 'no message id from host'),
+              { stop: false, presetId, degraded: ['reuse-send-unconfirmed'] },
+            )
+          }
+          return {
+            ok: true,
+            presetId,
+            childSessionId: resolved.id,
+            message:
+              `Reused existing ${presetId} worker ${resolved.id} (cold resume; no new worker started). ` +
+              `The brief was delivered to its next turn; messageId=${sent.messageId}. ` +
+              'Continue with `send_to_subagent` using this childSessionId.',
+            evidence: { broken: null, presetId, childSessionId: resolved.id, level: 'resumed' },
+          }
+        } catch (error) {
+          return failure(
+            'reuse-send-failed',
+            `Resuming worker ${resolved.id} failed: ${error instanceof Error ? error.message : String(error)}`,
+            { stop: false, presetId },
+          )
+        }
+      }
+      // hasFresh → 落到下面的新建逻辑。
     }
 
     // ── 递归闸：**由宿主 maxDepth 决定，本模块不硬编码**（2026-11-02 通用化）──
@@ -706,8 +858,7 @@ export function apply(ctx, config) {
           `Started a "${presetId}" worker: ${childSessionId}. ` +
           'Record that id now (into `todo_write`): `send_to_subagent` takes it as `agent_id`, and also accepts this worker\'s agent name or an unambiguous id prefix. ' +
           'It is a continuable subagent in this tree, not a teammate: `list_agents` lists it as a row named by ' +
-          'its path from the root, and a `running` row means it is working now. `wait_agent` takes no target at ' +
-          'all — it reports only that input reached your own inbox, never which worker settled. Tell the user ' +
+          'its path from the root, and a `running` row means it is working now. Tell the user ' +
           'what you dispatched, ' +
           'then either end your turn (its completion notice will wake you) or do independent work ' +
           'that touches different files.',
@@ -838,9 +989,9 @@ export function apply(ctx, config) {
       description:
         'Delegate a task to a worker running under one specific installed agent mode (preset). ' +
         '`preset` is REQUIRED — there is no default, because the wrong default silently wastes a ' +
-        'whole run. Call with `list: true` FIRST to read the roster before choosing. Pick by those ' +
-        'ranges, not by the mode name. The roster lists installed modes; an installed mode missing from it can still be dispatched if you know its id. A returned ' +
-        '`degraded` field is absent when nothing degraded; `stop: true` means do not retry. The ' +
+        'whole run. Call `list: true` first; pick by capability ranges, not mode name. An installed mode missing from the roster can still be dispatched if you know its id. ' +
+        'When reusable workers already exist in this conversation you MUST choose explicitly: pass `reuseId` (a childSessionId from the roster or a prior receipt) to cold-resume one, or `fresh: true` to start a new worker; otherwise the call is refused with `reusable-worker-exists` and up to 3 candidates. When no reusable worker exists, neither is needed. ' +
+        'A returned `degraded` field is absent when nothing degraded; `stop: true` means do not retry. The ' +
         'worker does not see this conversation. It starts in the background and this call returns its ' +
         'id immediately.',
       parameters: {
@@ -865,6 +1016,17 @@ export function apply(ctx, config) {
             description:
               '`true` returns the roster — a global numbered tool index plus per-mode tool-number ranges, ' +
               'and the installed skills.',
+          },
+          reuseId: {
+            type: 'string',
+            description:
+              'Cold-resume an existing reusable worker instead of starting a new one: a full childSessionId ' +
+              'or an unambiguous prefix. Required (or `fresh: true`) when reusable workers exist.',
+          },
+          fresh: {
+            type: 'boolean',
+            description:
+              'Explicitly start a new worker even when reusable ones exist. Mutually exclusive with `reuseId`.',
           },
         },
         required: [],

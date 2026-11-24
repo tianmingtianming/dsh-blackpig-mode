@@ -11,7 +11,6 @@
     "cordis.patch.yml",
     "file-info.mjs",
     "section-mute.mjs",
-    "blackpig-anchor.mjs",
     "blackpig-roster.mjs",
     "guard-v10.mjs",
     "compat.mjs",

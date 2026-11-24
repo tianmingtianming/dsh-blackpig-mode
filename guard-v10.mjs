@@ -281,7 +281,6 @@ const DEFAULT_KEEP = [
   'send_message',
   'list_agents',
   'interrupt_agent',
-  'wait_agent',
   'team_task_create',
   'team_task_list',
   'team_task_get',
@@ -399,7 +398,6 @@ const DEFAULT_KEEP = [
  * 计入「重复查询闸门」的工具。
  *
  * 这两个是实测的轮询大户（29 次 / 27 次），单次返回都不大，靠字节阈值裁不掉。
- * `wait_agent` 不在此列 —— 它本来就是用来等的。
  */
 const POLLING_TOOLS = new Set(['list_agents', 'team_task_list'])
 
@@ -538,7 +536,6 @@ function looksSpilled(text) {
 // and correct again if a future DSH registers it unconditionally.
 const TRIM_EXEMPT_TOOLS = new Set([
   'send_message', // 13 B
-  'wait_agent', // 18 B
   'interrupt_agent',
   'job_kill',
   'todo_write', // 57 B
@@ -1549,19 +1546,18 @@ export function apply(ctx, config) {
   /**
    * **团队工具在不在，是运行时才知道的**（2026-10-31 新增，用户选方案 C）。
    *
-   * 背景：团队工具由 `@deepseek-ai/dsh-experimental-tool-agent-team` 注册；其中
-   * `wait_agent` 也由宿主 `dsh-tool-subagent-control` 无条件提供（rc.5 起），
+   * 背景：团队工具由 `@deepseek-ai/dsh-experimental-tool-agent-team` 注册；
    * `团队派活工具` 在 rc.5 已不存在。而 `send_message` / `interrupt_agent` /
    * `list_agents` 是**两个包都有**（团队包 + 宿主自带的 `dsh-tool-subagent-control`），
    * 所以它们永远在。判"本部署有没有团队"只认 `team_task_create`，见下方
    * `teamAvailable()`；这张清单只用于剪枝/日志，不参与团队能力判定。
    *
-   * 问题：`keep` 里写死了这 6 个名字。团队插件一关，它们就不存在了，而
+   * 问题：`keep` 里写死了这几个名字。团队插件一关，它们就不存在了，而
    * `tools.restrict({ deny })` 会拿 `restrictableNames` 校验每个名字 ——
    * 未知名字直接抛错，整条限制装不上（黑猪是 fail-closed，会直接失去保护）。
    *
    * 解法：把 `keep` 先和 `restrictableNames` 求交，只保留**真实存在**的名字。
-   *   · 团队在线 → 这 6 个在集合里 → 保留 → 大脑能用团队
+   *   · 团队在线 → 这些名字在集合里 → 保留 → 大脑能用团队
    *   · 团队关闭 → 不在 → 自动剔掉 → restrict 不抛错 → 大脑自动 solo
    *
    * ⚠️ 为什么不能用「读 agent 可见集」来判断：可见集**已经被 restrict 过滤过**，
@@ -1573,7 +1569,6 @@ export function apply(ctx, config) {
    * （那个集合不含本层），会被误删。
    */
   const TEAM_ONLY_TOOLS = new Set([
-    'wait_agent',
     'team_task_create',
     'team_task_get',
     'team_task_list',
@@ -1603,9 +1598,9 @@ export function apply(ctx, config) {
    * keep 里永远有那几个名字，用 keep 判定会恒为 true，solo 会话也会说"团队在"。
    *
    * ⚠️ 2026-11-23 修（B4）：标志物只用 `team_task_create` 一个 —— 它是团队能力
-   * 唯一稳定的标志：`wait_agent` 由宿主 `dsh-tool-subagent-control` 无条件注册
-   * （rc.5 起本部署 preset 也显式挂载），`团队派活工具` 在 rc.5 已不存在，
-   * 两者都不能代表"本部署有没有团队"。用整张清单求 any 会让 solo 部署因一个
+   * 唯一稳定的标志：`团队派活工具` 在 rc.5 已不存在，`send_message` / `list_agents`
+   * / `interrupt_agent` 由宿主 `dsh-tool-subagent-control` 无条件注册，是通用工具，
+   * 都不能代表"本部署有没有团队"。用整张清单求 any 会让 solo 部署因一个
    * 通用工具恒判为有团队 → teamMode 恒真 → solo 分支文案永远不可达。
    * 标志物只认 team_task_create；团队能力一旦装上它就出现，卸载就消失，
    * 换部署/换版本仍成立，不需要维护名字清单。
@@ -2102,7 +2097,7 @@ export function apply(ctx, config) {
       seenForFaultCheck = seen
       const available = new Set(seen)
       // ⚠️ 这个结论要带进 guard 闭包：拒绝文案在 solo 模式下**不能**提
-      // wait_agent / team_task_get —— 那些工具不存在，文案会指引模型去调它。
+      // team_task_get —— 该工具不存在，文案会指引模型去调它。
       // 写成 agent → boolean 的 WeakMap，而不是捕获局部变量：guard 是本轮 sync
       // 装的，但可能在之后任一轮执行时被调用，必须读**当前**那份判断。
       teamOn.set(agent, teamAvailable(available))
@@ -2526,12 +2521,11 @@ export function apply(ctx, config) {
                 //   所以这里保留拒绝，但把话说清楚，避免模型重试同样的调用。）
                 //
                 // ⚠️ 2026-11-01 修：文案必须按模式分叉。solo 会话里没有
-                // wait_agent / team_task_get，原来那句「要等队友就调用一次 wait_agent」
-                // 会指引模型去调不存在的工具，撞一次错白烧一轮。
+                // team_task_get，团队分支的文案不能指引 solo 模型去调不存在的工具。
                 return teamMode
                   ? (
                       `blackpig mode: ${Math.round(sinceMs / 100) / 10} 秒前你刚用完全相同的参数查过 ${toolName}，` +
-                      '这中间没有任何变化，重查不会得到新信息。要等队友就调用一次 wait_agent；' +
+                      '这中间没有任何变化，重查不会得到新信息。等队友的结算通知即可（会自动到）；' +
                       '要查某个任务就用 team_task_get 按 id 单取。'
                     )
                   : (
@@ -2557,12 +2551,12 @@ export function apply(ctx, config) {
             const used = (counters.get(toolName) ?? 0) + 1
             counters.set(toolName, used)
             if (used > pollingBudget) {
-              // ⚠️ 同上：solo 模式不得提 wait_agent / team_task_get。
+              // ⚠️ 同上：solo 模式不得提 team_task_get。
               return teamMode
                 ? (
                     `blackpig mode: 本会话你已经调了 ${used} 次 ${toolName}（上限 ${pollingBudget}）。` +
                     '查列表不是等待，也不该是主要工作 —— 用 team_task_get 按 id 单取，' +
-                    '或者直接 wait_agent 等队友，把剩下的活写成任务书。'
+                    '或等队友的结算通知（会自动到），把剩下的活写成任务书。'
                   )
                 : (
                     `blackpig mode: 本会话你已经调了 ${used} 次 ${toolName}（上限 ${pollingBudget}）。` +
