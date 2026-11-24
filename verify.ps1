@@ -122,22 +122,19 @@ function Find-PresetDeclaration {
 # 维护者改完源码、重新打包后，应把这里更新为 `npm pack` 产物里的实测值。
 $expected = [ordered]@{
     'cordis.patch.yml'    = 0   # 不参与严格字节校验（人格随编辑变化；5/5 用段数+needle 断言）
-    'guard-v10.mjs'       = 198122   # 2026-11-24：DEFAULT_KEEP 去掉 'ls'（并入 file_info）
-    'blackpig-roster.mjs' = 48842   # 2026-11-24 r4：技能编号（Skill index + 模式行 | s[…]）
-    'subtalk.mjs'         = 58608   # 2026-11-24：描述压缩（send/stop）
-    'file-info.mjs'       = 40069   # 2026-11-24：并入 ls（list: true，200 条/8KB，不递归）
+    'guard-v10.mjs'       = 193023   # 2026-11-24：DEFAULT_KEEP 去掉 'ls'（并入 file_info）
+    'blackpig-roster.mjs' = 38943   # 2026-11-24 r4：技能编号（Skill index + 模式行 | s[…]）
+    'subtalk.mjs'         = 58663   # 2026-11-24：描述压缩（send/stop）
+    'file-info.mjs'       = 40070   # 2026-11-24：并入 ls（list: true，200 条/8KB，不递归）
     'section-mute.mjs'    = 2537    # 2026-11-24 新增：空文本段遮蔽 harness:source / app:web-surface
-    'compat.mjs'          = 57441   # 2026-11-24：applyToTools 的 agent 描述压缩
-    'package.json'        =  863   # 1.0.10（未 bump）：files[] 删 ls-tool、加 section-mute
+    'compat.mjs'          = 57537   # 2026-11-24：applyToTools 的 agent 描述压缩
+    'package.json'        =  736   # 1.0.10（未 bump）：files[] 12 项
     'blackpig-anchor.mjs' = 33296  # 1.0.9 二次修订：名册显示策略（按 N 分档 + 状态标记 + key 含 activity）
-    'README.md'           = 62647   # 记录值；仍在 skipSizeCheck（随文档编辑变化）
-    'CHANGELOG.md'        = 20561   # 记录值；仍在 skipSizeCheck（随文档编辑变化）
+    'README.md'           = 60733   # 记录值；仍在 skipSizeCheck（随文档编辑变化）
+    'CHANGELOG.md'        = 23551   # 记录值；仍在 skipSizeCheck（随文档编辑变化）
     'LICENSE'             = 1073
     'check.ps1'           = 0       # 在 $skipSizeCheck 里，不参与比对
     'verify.ps1'          = 0       # 自引用：写死自身字节必然追不上，不参与校验
-    'defaults/preset-caps.json' = 4069   # 兜底快照（live 名册不可用时）
-    'docs/preset-bench.md'      = 22204  # 文档，随编辑变化（只校验存在性）
-    'index.mjs'                 = 180    # 最小根入口：apply 空实现（宿主侧无行为）
 }
 
 # 不参与字节校验的文件（允许编辑，或换行符随 git 配置变化）：
@@ -145,13 +142,12 @@ $expected = [ordered]@{
 #   CHANGELOG.md —— 1.0.8 新增，随编辑变化
 #   cordis.patch.yml —— 人格随编辑变化，写死字节必然追不上；人格以段数与逐条断言核对
 #   verify.ps1 —— 自身，改一次字节就变，参与校验必然自死循环
-#   docs/preset-bench.md —— 随文档编辑变化（v1.0.7 新增；只校验存在性）
 #   check.ps1  —— 该脚本本身随检查项增删而变。.gitattributes 的 *.ps1 text eol=lf 只保证
 #                 入库与打包的换行符口径是 LF，并不保证「包内文件 = 源码 = 已安装副本」三者
 #                 字节数一致（已安装副本可能是上次打包留下的，会落后于源码，见重打包待办）。
 #                 真正跳过的理由是：写死字节的期望值必然追不上脚本编辑。
 # 注意：不要改用 SHA256 —— 换行符口径一变、或副本落后一个版本，SHA 同样对不上。
-$skipSizeCheck = @('README.md', 'CHANGELOG.md', 'cordis.patch.yml', 'check.ps1', 'verify.ps1', 'docs/preset-bench.md')
+$skipSizeCheck = @('README.md', 'CHANGELOG.md', 'cordis.patch.yml', 'check.ps1', 'verify.ps1')
 
 # ── 脚本来源布局判定（1.0.8）───────────────────────────────────────────────
 # v1.0.8 起新增 blackpig-anchor.mjs / CHANGELOG.md。脚本目录若含它们，说明脚本

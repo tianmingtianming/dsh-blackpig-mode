@@ -193,24 +193,21 @@ preset id 固定是 `blackpigmodel`，不能两个 bundle 各声明一次。会�
 
 ## 文件说明
 
-17 个文件（含 `defaults/`、`docs/` 两个子目录条目；r5 删掉了 `lib/client.js`），一句话一个（其中三个不参与字节校验，见下）：
+14 个文件（无子目录；r5 删 `lib/client.js`、r6 删 `defaults/` 与 `docs/` 两个文件），一句话一个（其中三个不参与字节校验，见下）：
 
 | 文件 | 作用 |
 | --- | --- |
 | `cordis.patch.yml` | 整套 preset 声明：1 个 `insert`，26 个顶层插件行（其中 2 个是 `cordis:group`，组内还有 4 行），人格前缀整段内联在这里 |
-| `guard-v10.mjs` | 大脑的工具面收窄与硬拦：`deny = 可见集 − 保留集`，只在大脑自己的 agent scope 上装；另有**两处结构性摘除**作用于队友（guard 摘 `spawn_teammate`、subtalk 摘 `stop_subagent`），那不是收窄 |
+| `guard-v10.mjs` | 大脑的工具面收窄与硬拦：`deny = 可见集 − 保留集`，只在大脑自己的 agent scope 上装；另有**一处结构性摘除**作用于队友（subtalk 摘 `stop_subagent`），那不是收窄 |
 | `compat.mjs` | **委派控制接口兼容层**：`detectControlApi` / `callSendMessage` / `resolveTargetId` / `applyToTools`。旧宿主的 `agent_id` 与新宿主的 `agent`（名字）在这里归一化，调用点不再各判一遍版本 |
-| `blackpig-roster.mjs` | `subagent_preset` 工具 + 代理名册：`list: true` **优先从活注册表派生**（`agentPresets.acquireScope` + `tools.view` + `skills.list`），接口缺失才回退 `preset-caps.json` 快照；派活走活的注册表校验 |
-| `defaults/preset-caps.json` | 内置的 4 个 DSH 模式基准数据，**名册的兜底快照**（实时派生不可用时使用） |
-| `docs/preset-bench.md` | caps 格式契约与运维（兜底语义、改描述、禁用模式） |
+| `blackpig-roster.mjs` | `subagent_preset` 工具 + 代理名册：`list: true` **优先从活注册表派生**（`agentPresets.acquireScope` + `tools.view` + `skills.list`）；接口缺失时报 `live roster unavailable`；派活走活的注册表校验 |
 | `subtalk.mjs` | `send_to_subagent` / `stop_subagent`：与已派出的代理继续对话或叫停，冷恢复它自己的上下文 |
 | `file-info.mjs` | `file_info`：只 stat 不读内容，给类型 / 存在性 / 字节数；`list: true` + `path` 时列目录直接子条目（200 条 / 8 KB 硬顶、不递归），已取代原 `ls` |
 | `section-mute.mjs` | 在 preset scope 注册**空文本段**，遮蔽全局 `harness:source` / `app:web-surface` 两个 prompt 段（空文本段被宿主渲染丢弃）；任何异常只记日志、不影响启动 |
-| ~~`member-persona.mjs`~~ | **已于 v1.0.6 删除（2026-11-12）**：rc.2 下它无任何触发路径（唯一能让子会话继承黑猪 preset 的 `subagent_fork` 已被 `extraDeny` 摘掉；`subagent_preset` 派出的子代理归属别的 preset，被 L279 主动放过）。四段报告格式改由大脑在 brief 里要求 |
 | `package.json` | `dsh.bundle.patch` 声明 + `"exports": { "./*": "./*" }` 子路径映射 |
 | `README.md` | 本文件（不参与字节校验） |
 | `check.ps1` | **装前**只读检查（**6 项编号检查**；`-DryRun` 才额外打印装包影响范围，**不编号**，`Report` 编号最大只到 `6/7`，默认不跑），发现同名声明时报行号并 exit 1。装完之后再跑它通常仍返回 0（READY）：「已含包名」判为 INFO（正常升级态），只有另有需清理项（如旧名 `dsh-blackpig-model` 残留）才返回 1（不参与字节校验） |
-| `verify.ps1` | **装后**生效验证（编号 0/5–4/5；无 5/5，结论行不编号）：包落盘（缺件判 FAIL）、`bundles` 登记、`dump-config` 退出码；包内文件字节以**参考信息**打印，**默认不影响退出码**，加 `-StrictSizes` 才按字节判；`README.md` / `check.ps1` / `verify.ps1` 三个恒 SKIP |
+| `verify.ps1` | **装后**生效验证（编号 0/5–5/5）：包落盘（缺件判 FAIL）、`bundles` 登记、`dump-config` 退出码；包内文件字节以**参考信息**打印，**默认不影响退出码**，加 `-StrictSizes` 才按字节判；`README.md` / `check.ps1` / `verify.ps1` 三个恒 SKIP |
 | `LICENSE` | MIT 许可证全文 |
 
 逐文件字节数不写在这张表里：包内的 `verify.ps1` 有一份内置参考值表，本表抄一份只会过期。要核对就运行 `verify.ps1`，第 1 项会逐个打印实际字节与参考值的差值——**它只是参考，不会让退出码变红**（要严格判就加 `-StrictSizes`）。
@@ -241,7 +238,7 @@ preset id 固定是 `blackpigmodel`，不能两个 bundle 各声明一次。会�
 
 **`list: true` 优先从活注册表派生**：对每个已安装 preset 调 `agentPresets.acquireScope(id)` 取 scope key，
 再用 `tools.view(key).visible` 取该模式的可见工具名、用 `skills.list({ cwd, scope: key })` 取技能名；
-接口缺失（老宿主）才回退静态 `preset-caps.json` 快照。
+接口缺失（老宿主）时明确报 `live roster unavailable: agentPresets.acquireScope is missing`，**不读任何文件**。
 
 现在的名册结构（示例，编号与工具名随部署而变）：
 
@@ -264,25 +261,16 @@ Skill index (12):
 - 工具编号 = registry 顺序 × 每个模式工具顺序，首现发号、三位补零，绝不截断。
 - 技能单独编号（`s01`…）= 模式顺序 × 每模式 `skills.list()` 顺序；模式行按模式给技能区间（`| s[…]`）。
 - 每模式只列编号区间：**不再有 `(N tools)` 计数、`suitable:` 两行、`skills:` 行及其 `only in` 子句**。
-- 单模式取不到（`broken` 或 `acquireScope` 抛错）时**仍保留该行**：能用 `preset-caps.json` 回填就回填并标
-  ` [snapshot]`；caps 里也没有该模式则写 `- <id>: — [unknown]`（不许吞行）。
-
-> 兜底：接口缺失时整份名册走静态 `preset-caps.json`（v3：用户文件优先、回退包内 `defaults/`），
-> 每行带 ` [snapshot]`。v1/v2 老格式仍直接回 `preset-caps-invalid`，不回退包内默认。
-
-
+- 单模式取不到（`broken` 或 `acquireScope` 抛错）时**仍保留该行**，写 `- <id>: — [unknown]`（不许吞行）。
 
 三件事分清楚：
 
 | 想做的事 | 怎么做 | 效果 |
 | --- | --- | --- |
-| 改描述文字 | 编辑 `preset-caps.json` 的 `suitableFor` / `notSuitableFor` | **v1.0.10 起名册不再渲染这两行**；字段只留给兜底/兼容，改了不会出现在名册 |
 | 只在名册里不显示 | 该模式加 `"hidden": true` | `list: true` 看不到它；**`delegate` 仍能派给它** |
 | 彻底禁用（不许派） | 黑猪 `cordis.patch.yml` 里 `blackpig-roster` 的 config 加 `disabledPresets: [mode-id]` | `delegate` 回 `preset-disabled`（stop: true） |
 
-> ⚠️ 两个「看不到」的坑：**名册看不到 ≠ 派不了**（`hidden: true` / 不在 JSON 里，都只是不显示）；
-> **派活永远是活的校验** —— `delegate` 读 `agentPresets` 注册表确认目标存在且没坏，与基准文件无关。
-> 所以基准文件写错只会让名册难看，不会让派活失败。要真禁用必须用 `disabledPresets`。
+> ⚠️ **名册看不到 ≠ 派不了**（`hidden: true` 只是不显示）；**派活永远是活的校验** —— `delegate` 读 `agentPresets` 注册表确认目标存在且没坏。要真禁用必须用 `disabledPresets`。
 
 ---
 
@@ -314,18 +302,11 @@ Skill index (12):
 
 ### v1.0.7
 
-**简化版：名册改成读静态基准文件 `preset-caps.json`；砍掉 `detail` / `ask` 两条查询分支。**
+**简化版：v1.0.7 曾把名册改成读静态快照；该链路已于 r6 整体删除，名册改回 live 优先。**
 
 这一版只动名册与查询，**派活逻辑一行未改**（`delegate()` 原样保留，含它自己的活校验）。
 
-- **新增 `defaults/preset-caps.json`**：内置 4 个模式（standard / ptc / minimal / cordis）的工具数
-  与「适合 / 不适合」说明。名册的回退数据源。
-- **新增 `docs/preset-bench.md`**：基准测试怎么跑（一段可复制 prompt）、结果写哪、怎么隐藏 / 禁用模式。
-- **`list: true` 改为「只读 JSON，不查注册表」**：渲染 4 行/模式以内，输出约 600–900 B
-  （4 个内置模式实测 1,392 B；首版 1,296 B，2026-11-15 修名册表头后 +96 B），不再出现
-  `files` / `shell` / `CAN-SPAWN-SUBAGENTS` / `?module` 这类推导标签。
-  读取顺序：`~/.dsh/blackpig-preset-caps.json` → 包内 `defaults/preset-caps.json` → 都没有则明确回
-  `preset-caps-missing` + 「未找到基准数据」并列出试过的路径（**不编造模式**）。
+- **删除 `list: true` 的静态快照读取**（r6），改为从活注册表派生；不再出现 `files` / `shell` / `CAN-SPAWN-SUBAGENTS` 这类推导标签。
 - **删除 `detail: true` 分支**（读单个 preset 的 YAML 声明）：名册已经写了「适合 / 不适合」，不需要再拉声明。
   连带删除 `readPresetDetail()`、`DETAIL_MAX_BYTES`、`config.detailMaxBytes`。
 - **删除 `ask: true` 分支**（起一个短 worker 让模式自述能力）：同样被基准文件取代。

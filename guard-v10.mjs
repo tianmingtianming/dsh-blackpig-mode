@@ -199,28 +199,6 @@ function ctxSafeError(message) {
 /** 本守卫所属的 preset id。 */
 const DEFAULT_PRESET_ID = 'blackpigmodel'
 
-/**
- * 队友**绝不能有**的工具名。
- *
- * 为什么单列一条常量、而不是塞进某个名单（2026-11-02）：
- *
- *   这是一个**结构性**约束，不是收窄策略。`spawn_teammate` 会创建 Agent Teams 成员，
- *   而 Agent Teams 的宿主域层硬写着 `spawnAdmitted` 里 `role !== 'lead'` → 抛
- *   `TEAM_LEAD_REQUIRED`。也就是说队友调用它**必然失败**，唯一区别是失败前白付
- *   schema、白烧一轮。留它在工具表里，等于告诉模型"你可以派队友"然后让它撞墙 ——
- *   那是我们自己造的错误文档。
- *
- * 为什么只摘这一个、不连带摘别的：
- *   队友需要 write / edit / pwsh / search / subagent 等**干活工具**（他们有完整工具面
- *   是设计的一部分）。任何"顺手一起摘"都会让队友少干成事，违反 guard 的取舍原则：
- *   **拿掉它会不会让人少干成一件事？** 对 spawn_teammate 答案是不会 —— 它本来就干不成。
- *
- * 与 `DEFAULT_KEEP` 里 `spawn_teammate` 的关系：两个对象不同。
- *   · `DEFAULT_KEEP` 管**大脑**（大脑必须留着它，只有大脑能派队友）；
- *   · 本常量管**队友**（队友一律没有它，无论保留集写了什么）。
- *   同一行名字出现在两个语义相反的地方，所以各自单独定义、各自注释，不做成共享表。
- */
-const TEAMMATE_FORBIDDEN_TOOL = 'spawn_teammate'
 
 /** 「读不出事实」的独立取值，与「确定不属于任何 preset」（undefined）区分开。 */
 const PRESET_UNKNOWN = Symbol('blackpigmodel/unknown-preset')
@@ -269,7 +247,7 @@ const DEFAULT_KEEP = [
 
   // ── 一次性代理（临时活派小弟干，干完即散）──
   // 与常驻队友并存：一个任务用谁，由大脑判断。
-  //   · 需要协作/复用/任务板 → spawn_teammate
+  //   · 需要协作/复用/任务板 → 团队派活工具
   //   · 干完就不要的一次性活 → subagent
   //
   // ⚠️⚠️ 2026-11-02 澄清一处容易读错的地方：这两个名字**留在保留集里，但大脑实际
@@ -300,7 +278,6 @@ const DEFAULT_KEEP = [
   // ── 团队协作（Agent Teams）──
   // ⚠️ 这 9 个由 tool-agent-team 注册在 agent 自己的 scope 上：
   //    restrict 既摘不掉、也不能写进 deny（会抛 unknown），必须在保留集里。
-  'spawn_teammate',
   'send_message',
   'list_agents',
   'interrupt_agent',
@@ -569,7 +546,6 @@ const TRIM_EXEMPT_TOOLS = new Set([
   'ask_user_question',
   'exit_plan_mode',
   'working_directory',
-  'spawn_teammate', // 250 B 左右
   'read_image', // 图像块，按字节截断会毁掉它
   // ⚠️ `read` 的豁免条目**已删除**（2026-10-31）——`read` 已不在工具面上。
   // 原豁免理由（宿主 spill-policy 无条件跳过 read）仍然成立，但已无适用对象。
@@ -1142,7 +1118,7 @@ function withAdditionalContexts(next, upstream) {
  *
  * ⚠️ 2026-11-07 修（R17，BUG-1）：去重键原来只有**整条消息串**，没有 agent 作用域。
  * 两个会话同因失败时消息文本一样 → 只留 1 条日志，第二个受害会话的失败被整条吞掉，
- * 而且那条 warn 也读不出受害者是谁。subtalk（R15）/ member-persona（R13b2）已修过
+ * 而且那条 warn 也读不出受害者是谁。subtalk（R15）/ 旧人格模块（R13b2）已修过
  * 同一个 bug，guard 这里补齐：
  *   · `scopeKey` 给定时（agent 相关告警传 `agentScopeKeyOf(agent)`），不同 agent 各一条；
  *   · `scopeKey` 缺省时（配置类 / 全局告警），行为与改前逐字节一致。
@@ -1218,7 +1194,7 @@ function isDelegatedChild(agent) {
  *   第一版投递层用的是「`isDelegatedChild` 且继承黑猪 preset」来认队友。那个判据
  *   当前恰好正确，但依赖宿主的隐含前提（`spawnTeammate()` 不传 `agentPreset`，
  *   所以队友必然继承父 preset）。宿主一旦允许「派出指定 preset 的队友」，那个队友
- *   就会带着 `spawn_teammate` 溜过去。
+ *   就会带着 `团队派活工具` 溜过去。
  *
  *   `agentTeams.tryMembership(agent)` 是宿主的**公开方法**（不抛错版，非队员返回
  *   `undefined`），返回 `{ root, id, role: 'lead' | 'teammate', name }`。
@@ -1258,7 +1234,7 @@ function isDelegatedChild(agent) {
  * session header 里的、不可伪造的父子关系。用它比用 `role` 字符串稳。
  *
  * 失败取向：**取不到服务就返回 `undefined`（当作「不是大脑、也不是队友」，走代理分支）**。
- * 这样最坏结果是「队友的 spawn_teammate 没被摘掉」—— 回到改动前的状态，宿主仍会在
+ * 这样最坏结果是「队友的 团队派活工具 没被摘掉」—— 回到改动前的状态，宿主仍会在
  * 调用时拒绝它。反过来（取不到就当大脑）会误收窄代理，那是不可接受的方向
  * （代理失去干活能力，且没有任何报错）。
  *
@@ -1282,7 +1258,7 @@ function teamMembershipOf(ctx, agent) {
   // 子会话丢进 tryMembership，误判成 teammate/lead。
   // 排除条件收窄为「种子会话 + 不是 subagent（无 origin）+ 无委派深度」：
   // 真队友即使 context:"fork"（isSeeded=true）也带 origin:'subagent' 且 delegationDepth>=1，
-  // 不能被这条早退误伤（否则它会丢掉 spawn_teammate 的摘除）。
+  // 不能被这条早退误伤（否则它会丢掉 团队派活工具 的摘除）。
   if (header?.isSeeded === true && header?.origin !== 'subagent' &&
       !(typeof header?.delegationDepth === 'number' && header.delegationDepth > 0)) {
     return undefined
@@ -1290,7 +1266,7 @@ function teamMembershipOf(ctx, agent) {
   // 这样即使 agentTeams 服务整个不可用、或者宿主把 role 判错，也不会把子会话
   // 当大脑收窄。这是比 role 字符串更根本的一层。
   if (hasParent) {
-    // 有父会话 = 通常是子会话（队友要摘 spawn_teammate，代理不动）；fork/种子会话已在上面早退。
+    // 有父会话 = 通常是子会话（队友要摘 团队派活工具，代理不动）；fork/种子会话已在上面早退。
     // 队友判定仍需要宿主的数据（谁是 team member 只有 Team journal 知道）。
     let teams
     try {
@@ -1575,7 +1551,7 @@ export function apply(ctx, config) {
    *
    * 背景：团队工具由 `@deepseek-ai/dsh-experimental-tool-agent-team` 注册；其中
    * `wait_agent` 也由宿主 `dsh-tool-subagent-control` 无条件提供（rc.5 起），
-   * `spawn_teammate` 在 rc.5 已不存在。而 `send_message` / `interrupt_agent` /
+   * `团队派活工具` 在 rc.5 已不存在。而 `send_message` / `interrupt_agent` /
    * `list_agents` 是**两个包都有**（团队包 + 宿主自带的 `dsh-tool-subagent-control`），
    * 所以它们永远在。判"本部署有没有团队"只认 `team_task_create`，见下方
    * `teamAvailable()`；这张清单只用于剪枝/日志，不参与团队能力判定。
@@ -1597,7 +1573,6 @@ export function apply(ctx, config) {
    * （那个集合不含本层），会被误删。
    */
   const TEAM_ONLY_TOOLS = new Set([
-    'spawn_teammate',
     'wait_agent',
     'team_task_create',
     'team_task_get',
@@ -1629,7 +1604,7 @@ export function apply(ctx, config) {
    *
    * ⚠️ 2026-11-23 修（B4）：标志物只用 `team_task_create` 一个 —— 它是团队能力
    * 唯一稳定的标志：`wait_agent` 由宿主 `dsh-tool-subagent-control` 无条件注册
-   * （rc.5 起本部署 preset 也显式挂载），`spawn_teammate` 在 rc.5 已不存在，
+   * （rc.5 起本部署 preset 也显式挂载），`团队派活工具` 在 rc.5 已不存在，
    * 两者都不能代表"本部署有没有团队"。用整张清单求 any 会让 solo 部署因一个
    * 通用工具恒判为有团队 → teamMode 恒真 → solo 分支文案永远不可达。
    * 标志物只认 team_task_create；团队能力一旦装上它就出现，卸载就消失，
@@ -1792,8 +1767,7 @@ export function apply(ctx, config) {
   //   · `budget`（WeakMap）—— 它是 read/grep 每轮探查预算的存储。而那套机制
   //     已随 read/grep 一起整段删除（见上方「read / grep 的阈值与预算常量已全部删除」），
   //     这个表从删掉那天起**从未被 get 或 set 过一次**。
-  //   · `currentTurn` + 下方的 `agent/pre-step` 监听 —— 那个监听唯一的目的就是
-  //     喂 `currentTurn`，而它只写不读（预算没了，没人再关心 turn 号）。
+  //   · `currentTurn` 与其 `agent/pre-step` 监听已随 read/grep 探查预算整段删除。
   //
   // 留着它们的代价不是性能，是**误导**：后来者读到这里会以为「还有预算机制」，
   // 顺手往里加规则，然后发现规则永远不生效。删干净比留注释更可靠。
@@ -2096,9 +2070,9 @@ export function apply(ctx, config) {
     //
     //   团队那 9 个工具由 `tool-agent-team` 注册在 **agent 自己的 scope 层**上，
     //   而 `restrictableNames` 的定义是「全局层 + 祖先层，**不含本层**」。
-    //   所以 `spawn_teammate` **永远不在** `restrictableNames` 里 ——
+    //   所以 `团队派活工具` **永远不在** `restrictableNames` 里 ——
     //   用它做判据会把团队工具**永远误判成"不存在"**，团队在线时也照样剔掉，
-    //   结果大脑连 spawn_teammate 都用不了。
+    //   结果大脑连 团队派活工具 都用不了。
     //
     //   可见集（`schemas(agent)` → `view(agent).visible`）**包含本层**，
     //   所以团队在不在它都能如实反映。
@@ -3023,8 +2997,8 @@ export function apply(ctx, config) {
   //     · 终止整条 serial 链 → 排在后面的 listener 一个都不执行；
   //     · 冒到 announce → agents.register() 的 effect 里 → agent 注册失败。
   //
-  // 本文件在 cordis.patch.yml 里**排在 member-persona 之前**（:295 vs :350 附近），
-  // 所以一次未捕获异常 = **member-persona 的人格静默不注入**，连一条 warn 都没有。
+  // 本文件在 cordis.patch.yml 里**排在 旧人格模块 之前**（:295 vs :350 附近），
+  // 所以一次未捕获异常 = **旧人格模块 的人格静默不注入**，连一条 warn 都没有。
   // 这是一个已经真实发生过的故障形态（有 Lead 会话人格回落成宿主默认），
   // 绝不能让本守卫成为它的放大器。
   //
@@ -3033,8 +3007,8 @@ export function apply(ctx, config) {
   ctx.on('agent/created', (payload) => {
     // ⚠️ 2026-11-07 修（R14，BUG-1）：参数**不解构** —— 解构发生在 try 之外，
     // handler(undefined) 会抛 "Cannot destructure property 'agent' of 'undefined'"，
-    // 这段保护根本兜不住，而且异常会截断整条 ctx.serial 链（含 member-persona 注入）。
-    // 与 member-persona.mjs:352 的 R8#8 同源：先取 payload.agent、判空、再装。
+    // 这段保护根本兜不住，而且异常会截断整条 ctx.serial 链（含 旧人格模块 注入）。
+    // 与 旧人格模块.mjs:352 的 R8#8 同源：先取 payload.agent、判空、再装。
     try {
       const agent = payload?.agent
       if (agent === undefined || agent === null) return
@@ -3054,7 +3028,7 @@ export function apply(ctx, config) {
         'blackpig-guard: syncing agent "' + agentId + '" threw — ' +
           'this agent tool surface was NOT narrowed. ' +
           'Contained here on purpose: agent/created is dispatched with ctx.serial(), which has no per-listener ' +
-          'try/catch, so letting this escape would also skip every later listener (including member-persona). ' +
+          'try/catch, so letting this escape would also skip every later listener (including 旧人格模块). ' +
           'Underlying error: ' + detail,
       )
     }
@@ -3230,63 +3204,19 @@ export function apply(ctx, config) {
       // 我们没有资格替别人擦屁股。
       if (decision === undefined || decision === null || typeof decision !== 'object') return decision
 
-      // ── 队友 / 代理：默认拿到完整工具面，但**队友要摘掉 spawn_teammate** ──
+      // ── 队友 / 代理：默认拿到完整工具面 ──
       //
-      // 2026-11-02 新增（用户要求「队友不能派队友」的机制化）。
-      //
-      // 背景：`spawn_teammate` 由宿主 `tool-agent-team` 注册在**每个队友自己的
-      // scope** 上，所以 `restrict()` 摘不掉它 —— 队友工具表里一直挂着一个
-      // 「调用必被拒」的工具（宿主 `spawnAdmitted` 里 `role !== 'lead'` 直接抛
-      // `TEAM_LEAD_REQUIRED`）。实测过若干队友、数百次调用、0 次成功。
-      //
-      // 代价：白付约 250 B schema / 每轮请求，且模型可能误试一次（白烧一轮）。
-      // 收益：把「队友不能派队友」从**运行时拒绝**变成**结构上没有这个工具**。
-      //
-      // 为什么只能在这里做（投递层）：
-      //   · `restrict()` 只动继承来的工具面，本层注册的名字摘不掉（已实测）；
-      //   · 这就是本瀑布存在的理由 —— 它改的正是**送进请求的最终列表**。
-      //
-      // ⚠️⚠️ 判据是「**这个 agent 是不是 Team 的队友**」，不是「它继承哪个 preset」。
-      //
-      //   第一版用的是 `isDelegatedChild && ownerPresetId === presetId`（继承黑猪
-      //   preset 的子会话）。那个判据**当前**恰好正确，但依赖一个宿主隐含前提：
-      //   `spawnTeammate()` 不传 `agentPreset`，所以队友必然继承父 preset。一旦宿主
-      //   允许「派出指定 preset 的队友」，那个队友就会带着 spawn_teammate 溜过去。
-      //
-      //   现在改用宿主的**权威判据**：`agentTeams.tryMembership(agent)`（公开方法，
-      //   不抛错版，非队员返回 undefined），返回 `role: 'lead' | 'teammate'`。
-      //   这正是宿主自己在 `spawnAdmitted` 里用的那一个 —— 同一份事实、同一个来源。
-      //
-      //   为什么不直接用 `ownerPresetId`（仍保留它的用途）：那个回答的是
-      //   「谁的人格该生效」，不是「谁能派队友」。两个问题不该共用一个判据。
+      // 队友的判据用宿主权威来源 `agentTeams.tryMembership(agent)`（公开方法，非队员返回 undefined），
+      // 与宿主 `spawnAdmitted` 同一份事实；代理（非 Team 成员的子会话）保持完整工具面。
       const membership = teamMembershipOf(ctx, agent)
       if (membership !== undefined) {
-        // 大脑（role: 'lead'）：**必须保留** spawn_teammate —— 只有它能派队友。
-        // 大脑的其余收窄由下方原有的 keep/deny 逻辑处理（本分支只管队友）。
+        // 大脑（role: 'lead'）：继续往下走原有收窄路径；队友不裁。
         if (membership.role !== 'teammate') {
-          // 继续往下走原有的大脑收窄路径。
+          // fallthrough
         } else {
-          // 队友：只摘 spawn_teammate，其余全留。
-          // 用单独的窄数组而不是复用 `isCoordinatorTool` —— 队友该有 write/pwsh/shell，
-          // 那些正是他们干活的工具，绝不能碰。
-          const tools = Array.isArray(decision.tools) ? decision.tools : Array.isArray(assembly?.tools) ? assembly.tools : undefined
-          if (Array.isArray(tools) && tools.some((tool) => tool?.name === TEAMMATE_FORBIDDEN_TOOL)) {
-            const kept = tools.filter((tool) => tool?.name !== TEAMMATE_FORBIDDEN_TOOL)
-            // 下限保护：绝不允许裁成空（理论上不可能，但守住 guard 的同一条规矩）。
-            if (kept.length > 0) {
-              logInfo(
-                `blackpig-guard: a teammate's request dropped the "${TEAMMATE_FORBIDDEN_TOOL}" schema ` +
-                  `(team=${String(membership.name)}; a teammate can never spawn teammates)`,
-              )
-              return { ...decision, tools: kept }
-            }
-          }
           return decision
         }
       } else if (isDelegatedChild(agent)) {
-        // 不是 Team 成员的子会话 = 代理（standard preset 等）：完整工具面，不裁。
-        // 代理本来就没有 spawn_teammate / team_task_*（它们的 preset 里没装团队工具），
-        // 这里只是保持「代理工具面不受黑猪 guard 影响」这条既有契约。
         return decision
       }
 
@@ -3445,9 +3375,7 @@ export function apply(ctx, config) {
   )
   // ⚠️ 2026-11-01：`agent/pre-step` 监听已删除。
   //
-  // 它唯一的作用是把 turn 号记进 `currentTurn`，供 read/grep 的「每轮探查预算」
-  // 判断要不要重置。那套预算已随 read/grep 整段删除，`currentTurn` 只写不读，
-  // 这个监听成了**纯粹的空转**（每轮多一次回调、多一次 WeakMap 写）。
+  // 它唯一的作用是把 turn 号记进 `currentTurn`；那套预算已随 read/grep 整段删除，该监听已成空转。
   //
   // 删除不影响任何现行规则：轮询闸门（polling / pollingCount）按**时间窗与次数**
   // 计，本来就不看 turn。
@@ -3494,7 +3422,7 @@ export function apply(ctx, config) {
     // preset」那段同源（原先两处逐字重复）。先收集、再 release、最后删 —— 顺序不变。
     // ⚠️ 2026-11-07 修（R14，BUG-1）：同 agent/created —— 参数**不解构**，取 payload 与判空
     // 都放在 try 内；畸形载荷（undefined / null / {}）直接 return，绝不从这里抛出截断
-    // ctx.serial 的后续监听（含 member-persona 的人格注入）。
+    // ctx.serial 的后续监听（含 旧人格模块 的人格注入）。
     try {
       const agent = payload?.agent
       if (agent === undefined || agent === null) return

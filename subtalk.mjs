@@ -5,7 +5,7 @@
  *
  * 本模块服务于 `subagent_preset` 派出的子代理；团队通道走 `send_message`。
  * （`subagent`/`subagent_fork` 仍声明在 YAML，但已被 extraDeny 从大脑面摘掉，
- *   不是保留给大脑的委派路径；`spawn_teammate` 属于团队通道。）
+ *   不是保留给大脑的委派路径；`团队派活工具` 属于团队通道。）
  *
  * 宿主的 `dsh-tool-subagent` 本身支持「对直系可续代理继续说话、甚至在它让出后唤醒」，
  * 协议就是 `ctx.subagents.sendMessage(sender, childId, content, { signal })`。
@@ -256,7 +256,7 @@ function subagentsOf(ctx) {
  * `running` / `idle` 来自**活 agent 注册表**（`ctx.agents.get(id)`，宿主
  * `dsh-agent` 的公开读方法）；`finished` 来自**已落盘的子会话目录**
  * （v1.0.10 起走 `sessionQuery.subagentCatalog` 投影 / `subagents.listDescendants()`，
- * 见 compat 的 `readCallerChildCatalog()`；宿主 `listChildren` 在 rc.2 已删除）；
+ * 见 compat 的 `readCallerChildCatalog()`；宿主 `旧子会话列举接口` 在 rc.2 已删除）；
  * `unknown` 表示两处都查不到 —— 可能是 id 写错，也可能会话已被清理。
  *
  * @typedef {'running' | 'idle' | 'finished' | 'unknown'} TargetState
@@ -300,7 +300,7 @@ function liveAgentOf(ctx, id) {
 /**
  * durable 子会话目录的读法标签（写进 `describeTarget().source` 与用户可见文案）。
  *
- * v1.0.10：源码里再也**不许**出现 `subagents.listChildren()` 这个说法 ——
+ * v1.0.10：源码里再也**不许**出现 `subagents.旧子会话列举接口()` 这个说法 ——
  * 该方法在 DSH v0.2.1-rc.2 已删除，写进回执只会把排查引向不存在的东西。
  *
  * @param source - compat.readCallerChildCatalog() 返回的 source。
@@ -320,10 +320,10 @@ function catalogSourceLabel(source) {
  * **绝不当成「存在」**。
  *
  * ⚠️ v1.0.10 修（缺陷 2，1.0.9 恒返回 unavailable 的连带故障）：
- * 旧实现用 `sub.listChildren(parentSessionId, signal)` —— 该方法**在
+ * 旧实现用 `sub.旧子会话列举接口(parentSessionId, signal)` —— 该方法**在
  * DSH v0.2.1-rc.2 已被删除**（`dsh/docs/upgrade-guide/v0.2.1-rc.2/
  * subagent-service-methods/guide.zh.md:13`），于是第一行
- * `typeof sub.listChildren !== 'function'` 直接 return `'unavailable'`，
+ * `typeof sub.旧子会话列举接口 !== 'function'` 直接 return `'unavailable'`，
  * `isKnownIdProbe()` 恒 false，`describeTarget()` 永远读不到 catalog。
  * 现在改用 compat 的 `readCallerChildCatalog()`（sessionQuery.subagentCatalog
  * 主路径 + listDescendants 退路，与 compat 的解析器**同一套**读法）。
@@ -1044,10 +1044,10 @@ export function apply(ctx, config) {
       // ⚠️ 2026-11-07 修（R15，BUG-1）：原先在参数位置解构 `({ agent }) =>`，而 try 在解构之后 ——
       // 宿主真给 undefined 时，解构本身先抛 `Cannot destructure property 'agent' of 'undefined'`，
       // 根本进不到 try。`agent/created` 走 `ctx.serial`、没有 per-listener try/catch，
-      // 这一抛会截断后续监听（member-persona 的人格注入等）并回滚 agent 创建。
+      // 这一抛会截断后续监听（旧人格模块 的人格注入等）并回滚 agent 创建。
       // 现在先收整个 payload，在 try 内部取值、判空；正常载荷行为不变。
       // `ctx.logger?.error?.()` 也可能抛，所以吞在本层、记一条 warn、让链继续。
-      // 与 member-persona.mjs 的 agent/created 回调同一取向。
+      // 与 旧人格模块.mjs 的 agent/created 回调同一取向。
       let scopeKey = '<unknown>'
       try {
         const agent = payload?.agent
@@ -1069,7 +1069,7 @@ export function apply(ctx, config) {
       if (agents !== undefined && agents !== null && typeof agents.list === 'function') {
         // ⚠️ 2026-11-07 修（R14a2，BUG-A）：`agents.list()` 的返回值必须先判数组。
         // 旧实现直接 for...of，返回字符串 / null / 对象时抛 TypeError，被下面那个空 catch
-        // 吞掉 → 该轮零隐藏、零日志。与 member-persona.mjs 的 R10#3 同一点同一改法：
+        // 吞掉 → 该轮零隐藏、零日志。与 旧人格模块.mjs 的 R10#3 同一点同一改法：
         // 非数组按空列表处理，并明确 warn 实际类型；正常数组的行为逐字节不变。
         const listedAgents = agents.list()
         if (!Array.isArray(listedAgents)) {

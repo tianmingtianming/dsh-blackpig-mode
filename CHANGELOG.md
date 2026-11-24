@@ -6,6 +6,17 @@
 > 只重打 tgz 并覆盖 GitHub Release `v1.0.10` 的资产，不产生 1.0.11。
 > 判断装机版本仍看 `package.json` 的 `version` + 本节日期。
 
+### 2026-11-24 r6（删净基准测试残留；名册完全 live）
+
+> 同一版本号 `1.0.10` 下原地覆盖；**版本号不 bump**。
+
+- **删除 caps 兜底整条链**：`defaults/preset-caps.json`、`docs/preset-bench.md`、`CAPS_FILE_NAME` / `CAPS_DEFAULTS_RELATIVE` / `loadPresetCaps` / `validateV3` / `readCapsCandidate` / `rowsFromCaps`，以及 `preset-caps-invalid` / `preset-caps-missing` 两个错误分支。
+- **名册只走 live**：`agentPresets.acquireScope` 或 `tools.view` 缺失时直接渲染一句 `live roster unavailable: agentPresets.acquireScope is missing`（带 `degraded: ['live-roster-unavailable']`），**不再读任何文件**。
+- **取不到的模式**：行显示 `- <id>: — [unknown]`；`[snapshot]` 回填与标记删除。
+- 连带：`package.json` `files[]` 12 项、包 **14 文件 / 0 目录 / 14 打包条目**；`verify.ps1` 删两行期望值、`skipSizeCheck` 去掉 `docs/preset-bench.md`；README 里 caps 段落改为「不依赖基准快照」。
+- **死物清理**：`guard-v10.mjs` 删 `spawn_teammate`（三张表 + `TEAMMATE_FORBIDDEN_TOOL` + 队友摘除分支）；删 `index.mjs` 及 `package.json` 的 `main` 与 `exports["."]`（保留 `"./*"` 子路径映射）；清掉 roster 的 caps 注释、guard 的旧人格模块/currentTurn 历史注释、compat/subtalk 的旧子会话列举接口注释。
+- 未动用户文件 `~/.dsh/blackpig-preset-caps.json`（已另备份；确认后再删）。
+
 ### 2026-11-24 r4（技能编号 S-Num-A）
 
 > 同一版本号 `1.0.10` 下原地覆盖；**版本号不 bump**。

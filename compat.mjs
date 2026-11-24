@@ -502,7 +502,7 @@ export function applyToTools(parameters, opts = {}) {
  *
  * v1.0.10 两处改：
  *   · `tried` 只含**真正执行过**的解析来源（1.0.9 在调用前 push，导致没跑的
- *     「listChildren 前缀匹配」也出现在文案里）；
+ *     「旧子会话列举接口 前缀匹配」也出现在文案里）；
  *   · 候选带 **name + 完整 id**，且 0 命中时也按最长公共前缀给近似候选；
  *   · 会误导的 `control API: old` 从面向用户的报错里**去掉**（只保留在内部
  *     warn 日志里，见 detectControlApi）。理由：该字段不参与任何分支，写进
@@ -631,16 +631,16 @@ export function callerSessionIdsOf(sender) {
  * 读调用方自己的 durable 子会话目录（v1.0.10 重写）。
  *
  * ── 为什么整段重写（1.0.9 回归的第二层根因）──────────────────────────────────
- * 1.0.8/1.0.9 用的是 `sub.listChildren(parentId, signal)` —— 那个方法**在
+ * 1.0.8/1.0.9 用的是 `sub.旧子会话列举接口(parentId, signal)` —— 那个方法**在
  * DSH v0.2.1-rc.2 已被删除**（归档内 `dsh/docs/upgrade-guide/v0.2.1-rc.2/
  * subagent-service-methods/guide.zh.md:13` 明写移除 `drainChildren` /
- * `listChildren` / `list()`）。于是 1.0.9 的第三级前缀解析**恒失败**：
- * `typeof sub.listChildren !== 'function'` 直接 return。
+ * `旧子会话列举接口` / `list()`）。于是 1.0.9 的第三级前缀解析**恒失败**：
+ * `typeof sub.旧子会话列举接口 !== 'function'` 直接 return。
  *
  * ── 现在用的两条路径（都在 rc.5 归档里核实过）──────────────────────────────
  * A. 主路径 `ctx.get('sessionQuery').observeSession(parentId, { signal })`
  *    → `observation.projections?.values.subagentCatalog`
- *    这正是宿主自己 `listChildren` 的内部实现（`dsh-subagent/lib/index.js:2444-2455`），
+ *    这正是宿主自己 `旧子会话列举接口` 的内部实现（`dsh-subagent/lib/index.js:2444-2455`），
  *    升级指南 `:18` 也把这条列为官方迁移写法。投影行形状见 `dsh-subagent/lib/index.js:902-906`：
  *    `{ id, createdAt, mode, label, name? }`（`id` 即 childSessionId，`mode` 取
  *    'continuable'|'one-shot'|'external'|'unknown'，`name` 只有 v3 目录项才有）。
@@ -678,7 +678,7 @@ export async function readCallerChildCatalog(ctx, sub, sender, signal) {
   const parentIds = callerSessionIdsOf(sender)
   if (parentIds.length === 0) return result
 
-  // ── A：sessionQuery 观察 → subagentCatalog 投影（宿主 listChildren 的同一条路）──
+  // ── A：sessionQuery 观察 → subagentCatalog 投影（宿主 旧子会话列举接口 的同一条路）──
   let query
   try {
     query = ctx?.get?.('sessionQuery')
@@ -810,7 +810,7 @@ export async function resolveTargetId(ctx, target, opts = {}) {
   // ── 第 0 级：完整 childSessionId 直通（v1.0.10 回归修复）──────────────────
   // ⚠️ 1.0.9 的回归：L670 的条件 `if (id !== wanted || !looksLikeIdPrefix(wanted))`
   // 让**完整 UUID 在 resolveName 回弹后被拒**（id === wanted 且 looksLikeIdPrefix 为真
-  // → 不采信）→ 落到第 3 级 → 而第 3 级依赖已被 rc.2 删除的 `sub.listChildren` → 恒失败。
+  // → 不采信）→ 落到第 3 级 → 而第 3 级依赖已被 rc.2 删除的 `sub.旧子会话列举接口` → 恒失败。
   // 结果：1.0.8 明明可用的「传完整 childSessionId 冷恢复」在 1.0.9 全断。
   // 修法：完整 UUID 不需要任何解析，形状本身就是权威 —— 直接采信，连探测都不做。
   if (isFullChildSessionId(wanted)) return { id: wanted, how: 'full-id', api }
@@ -1044,7 +1044,7 @@ function looksLikeIdPrefix(target) {
  * 在调用方（sender）自己的 durable 子会话目录里做 id 前缀匹配（v1.0.10 重写）。
  *
  * 数据源改走 `readCallerChildCatalog()`（sessionQuery.subagentCatalog 主路径 +
- * listDescendants 退路），不再依赖 DSH v0.2.1-rc.2 已删除的 `sub.listChildren()`。
+ * listDescendants 退路），不再依赖 DSH v0.2.1-rc.2 已删除的 `sub.旧子会话列举接口()`。
  *
  * @param ctx - 插件上下文。
  * @param sub - subagents 服务。

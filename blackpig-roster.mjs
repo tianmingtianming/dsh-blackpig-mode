@@ -6,29 +6,14 @@
  * 与 standard 都不同，活派给 standard 就干不了，白烧一轮且不报错。
  * 根因不是模型懒，是「不传也能成功」。所以本模块把「用哪个模式」变成必填参数。
  *
- * 名册 live 优先（`agentPresets.acquireScope`）；静态 `preset-caps.json` 仅作兜底。
- *
- *   ① 用户文件优先：`~/.dsh/blackpig-preset-caps.json`
- *   ② 回退包内默认：`<包目录>/defaults/preset-caps.json`
- *   ③ 都没有 → 明确回「未找到基准数据」，不编造模式、不猜能力。
- *
- * 为什么是静态文件（2026-11-14 简化，用户决定）：宿主能告诉名册的是「这个模式装载了
- * 哪些模块」，给不出**运行时真实可调用的工具名**（`definitions(scope)` 要求 scope 是
- * 活跃 Agent），而且工具集随插件增减而变 —— 官方原文：a tool schema is not statically
- * knowable。从模块推导出来的能力标签既不可靠又长，所以名册改为读一份人工跑出来的
- * 基准文件（跑法见 `docs/preset-bench.md`）。顺带砍掉了 `detail: true` / `ask: true`
- * 两条查询分支：名册本身已经写清「适合 / 不适合」，不需要再读声明或起 worker 自述。
+ * 名册完全 live：从活注册表派生（`agentPresets.acquireScope` + `tools.view` + `skills.list`）。
+ * 不读任何基准文件；接口缺失时明确报 `live roster unavailable`，不编造模式、不猜能力。
  *
  * 派活（`delegate`）仍然走**活校验**：`registry.list()` 确认目标模式真实存在且没坏。
- * 基准文件只决定「名册怎么写」，不决定「能不能派」。
  *
  * @module blackpig-model/blackpig-roster
  */
 
-import fs from 'node:fs'
-import os from 'node:os'
-import path from 'node:path'
-import { fileURLToPath } from 'node:url'
 
 /** Cordis 插件名，用于 loader 诊断。 */
 export const name = 'blackpig-roster'
@@ -134,124 +119,6 @@ function warnOnceFactory(ctx) {
 
 /**
  * 基准文件名与查找顺序。
- *
- *   ① 用户文件优先：`~/.dsh/blackpig-preset-caps.json`（用户自己跑基准测试后的产物）
- *   ② 回退包内默认：`<包目录>/defaults/preset-caps.json`（只含 DSH 的 4 个内置模式）
- *
- * 两者都读不到时**不编造模式**：返回一条「未找到基准数据」的失败回执 + degraded。
- */
-const CAPS_FILE_NAME = 'blackpig-preset-caps.json'
-const CAPS_DEFAULTS_RELATIVE = ['defaults', 'preset-caps.json']
-
-/** 本模块所在目录（= 包目录），用于定位 `defaults/preset-caps.json`。 */
-const MODULE_DIR = path.dirname(fileURLToPath(import.meta.url))
-
-/**
- * v3 新格式必需字段校验（**老格式不兼容**）。
- *
- * 顶层：`version === 3`、`scope`、`baseline`、`baselineTools`（数组）。
- * A 规则（2026-11-20）：每个 preset 必需 `tools` / `toolCount` / `suitableFor` / `notSuitableFor`；
- * lacks / gains / only / comparisonSummary 已废弃，保留兼容但不校验、不渲染。
- *
- * ⚠️ 2026-11-15（v3）：**不回退老格式**。用户明确「老格式现在没人用」；格式不对就是不对，
- * 直接回 `preset-caps-invalid`，不再把 v1/v2 当成「能凑合读」的数据源。
- *
- * @param parsed - 已 JSON.parse 的对象。
- * @returns `{ ok: true }` 或 `{ ok: false, error }`。
- */
-function validateV3(parsed) {
-  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
-    return { ok: false, error: 'the top level is not a JSON object' }
-  }
-  if (parsed.version !== 3) {
-    return { ok: false, error: 'version !== 3 (old format is no longer supported; no fallback)' }
-  }
-  if (typeof parsed.scope !== 'string' || parsed.scope === '') {
-    return { ok: false, error: 'scope is missing or is not a string' }
-  }
-  if (typeof parsed.baseline !== 'string' || parsed.baseline === '') {
-    return { ok: false, error: 'baseline is missing or is not a string' }
-  }
-  if (!Array.isArray(parsed.baselineTools)) {
-    return { ok: false, error: 'baselineTools is missing or is not an array' }
-  }
-  const presets = parsed.presets
-  if (presets === null || typeof presets !== 'object' || Array.isArray(presets)) {
-    return { ok: false, error: 'the presets field is missing or is not an object' }
-  }
-  // A 规则（2026-11-20）：名册只渲染 tools 编号 + suitable/notSuitable，
-  // lacks/gains/only/comparisonSummary 不再使用；放宽为可选以兼容旧格式 defaults 与新格式 local。
-  const required = ['tools', 'toolCount', 'suitableFor', 'notSuitableFor']
-  for (const id of Object.keys(presets)) {
-    const entry = presets[id]
-    if (entry === null || typeof entry !== 'object' || Array.isArray(entry)) {
-      return { ok: false, error: `preset "${id}" is not an object` }
-    }
-    for (const field of required) {
-      if (!(field in entry)) {
-        return { ok: false, error: `preset "${id}" is missing required field "${field}"` }
-      }
-    }
-  }
-  return { ok: true }
-}
-
-/**
- * 读并解析一个候选文件。
- *
- * 不存在 / 读不动 / JSON 坏 / **v3 结构不对**都返回 `{ ok: false, reason, error }`。
- * ⚠️ 候选失败后**不再继续试下一个**：老格式（用户文件写成 v1/v2）必须报
- * `preset-caps-invalid`，不能被「回退包内默认」静默掩盖 —— 用户明确老格式不兼容。
- *
- * @param filePath - 候选文件的绝对路径。
- * @returns `{ ok: true, caps, source }` 或 `{ ok: false, reason, error }`。
- */
-function readCapsCandidate(filePath) {
-  let raw
-  try {
-    raw = fs.readFileSync(filePath, 'utf8')
-  } catch (error) {
-    return { ok: false, reason: 'unreadable', error: error instanceof Error ? error.message : String(error) }
-  }
-  let parsed
-  try {
-    parsed = JSON.parse(raw)
-  } catch (error) {
-    return { ok: false, reason: 'invalid-json', error: error instanceof Error ? error.message : String(error) }
-  }
-  const valid = validateV3(parsed)
-  if (!valid.ok) {
-    return { ok: false, reason: 'preset-caps-invalid', error: valid.error }
-  }
-  return { ok: true, caps: parsed, source: filePath }
-}
-
-/**
- * 按「用户文件 → 包内默认」的顺序找基准数据。
- *
- * ⚠️ 2026-11-15（v3）：用户文件**存在但格式不是 v3**（含 v1/v2 老格式）时**立刻失败**，
- * 不再继续试包内默认 —— 老格式不兼容，不能被「回退到 4 个内置模式」静默掩盖。
- * 只有「用户文件不存在 / 读不动 / JSON 坏」才继续试包内默认（那才是「没跑过基准」的场景）。
- *
- * @returns `{ ok: true, caps, source }` 或 `{ ok: false, reason, errors }`。
- */
-function loadPresetCaps() {
-  const home = typeof os.homedir === 'function' ? os.homedir() : ''
-  const candidates = []
-  if (home !== '') candidates.push(path.join(home, '.dsh', CAPS_FILE_NAME))
-  candidates.push(path.join(MODULE_DIR, ...CAPS_DEFAULTS_RELATIVE))
-  const errors = []
-  for (const candidate of candidates) {
-    const read = readCapsCandidate(candidate)
-    if (read.ok) return read
-    if (read.reason === 'preset-caps-invalid') {
-      return { ok: false, reason: 'preset-caps-invalid', errors: [candidate + ': ' + read.error] }
-    }
-    errors.push(candidate + ': ' + read.error)
-  }
-  return { ok: false, reason: 'missing', errors }
-}
-
 /**
  * 当前工作目录 —— 技能枚举必须带 cwd，否则会漏掉项目级技能。
  *
@@ -288,7 +155,7 @@ async function currentCwd(ctx) {
  *
  * @param ctx - 插件上下文。
  * @param selfId - 本模式自己的 preset id（名册不列自己）。
- * @returns 行数组；接口缺失（老宿主）时返回 null，由调用方走 caps 兜底。
+ * @returns 行数组；接口缺失（老宿主）时返回 null（调用方改报 live roster unavailable）。
  *   单模式失败**不拖垮整体**：该行回填 `live:false` 与错误原因。
  */
 async function collectLive(ctx, selfId) {
@@ -317,7 +184,7 @@ async function collectLive(ctx, selfId) {
   for (const row of rows) {
     if (row === null || typeof row !== 'object') continue
     if (row.id === selfId) continue
-    // broken 模式不许消失：出一行、用 caps 回填，回填不到则 [unknown]。
+    // broken 模式不许消失：仍出一行，写 — [unknown]。
     if (row.broken !== undefined) {
       out.push({
         id: row.id,
@@ -506,7 +373,7 @@ function renderSkillTable(numbering) {
 }
 
 /**
- * 渲染名册（2026-11-24 阶段 4：改为实时派生，静态 caps 只作兜底）。
+ * 渲染名册（2026-11-24：完全 live 派生，不再读任何静态文件）。
  *
  * 输出形状：
  *
@@ -521,7 +388,7 @@ function renderSkillTable(numbering) {
  * 规则：
  *   · 编号按 rows 顺序（registry 顺序）× 每个模式自己的工具顺序首现分配，绝不截断。
  *   · 每模式只用编号区间表达：不写 `(N tools)`、不写 suitable / notSuitable。
- *   · 回填行（`live !== true`）在行末标 ` [snapshot]`。
+ *   · 取不到的模式行写 `— [unknown]`。
  *   · 技能只在 live 行里聚合；`only in …` 只列「不是所有 live 模式都有」的技能。
  *   · **不设字节上限**（`ROSTER_HARD_CAP_BYTES` 已整体移除，别加回来）。
  *
@@ -569,7 +436,7 @@ function renderRows(rows) {
   for (const row of rows) {
     const tools = Array.isArray(row?.tools) ? row.tools : []
     const nums = tools.map((tool) => numbering.get(String(tool))).filter((n) => typeof n === 'number')
-    if (row.unknown === true) {
+    if (row.unknown === true || row.live !== true) {
       lines.push(`- ${row.id}: — [unknown]`)
       continue
     }
@@ -577,32 +444,13 @@ function renderRows(rows) {
       ? row.skills.map((name) => skillNumber.get(String(name))).filter((n) => typeof n === 'number')
       : []
     const skillPart = skillNums.length > 0 ? ` | ${compressSkillRuns(skillNums)}` : ''
-    lines.push(`- ${row.id}: ${compressRuns(nums)}${row.live === true ? '' : ' [snapshot]'}${skillPart}`)
+    lines.push(`- ${row.id}: ${compressRuns(nums)}${skillPart}`)
   }
 
   return { text: lines.join('\n'), degraded }
 }
 
 /**
- * 用静态 caps 构造 rows（兜底路径）：每行都是 snapshot，不带技能。
- *
- * @param caps - 已通过校验的 caps 对象。
- * @param selfId - 本模式自己的 preset id。
- * @returns rows 数组（顺序同 caps.presets 键顺序）。
- */
-function rowsFromCaps(caps, selfId) {
-  const rows = []
-  const presets = caps?.presets ?? {}
-  for (const id of Object.keys(presets)) {
-    if (id === selfId) continue
-    const entry = presets[id]
-    if (entry === null || typeof entry !== 'object' || Array.isArray(entry)) continue
-    if (entry.hidden === true) continue
-    rows.push({ id, tools: Array.isArray(entry.tools) ? entry.tools.map(String) : [], skills: [], live: false })
-  }
-  return rows
-}
-
 /**
  * 可用模式 id 列表：排除非对象行、空 id、自己、以及 broken 行。
  *
@@ -810,7 +658,7 @@ export function apply(ctx, config) {
     // 原设计有两层人工边界（`allowedPresets` / `deniedPresets`），都已删除：
     //   · 白名单让「装新模式」必须回来改黑猪配置，模式不可通用；
     //   · 黑名单是白名单的补丁，同样是替运维记「哪些模式可以派」。
-    // 现在：名册只展示 live（或兜底 caps）里的模式；没显示的模式仍可派（delegate 走活校验）。
+    // 现在：名册只展示 live 里的模式；没显示的模式仍可派（delegate 走活校验）。
     //
     // ⚠️ 2026-11-02（第二轮复核 P2-2）：存在性校验抽成了 `presetUnusable()`，
     //    统一处理「不存在 / broken / self」三道前置，任何派活路径都先过它。
@@ -1029,69 +877,15 @@ export function apply(ctx, config) {
       isConcurrencySafe: () => true,
       async execute(args, exec) {
         if (args?.list === true) {
-          // ① 优先：从活注册表实时派生（工具清单 + 技能清单，接口缺失时返回 null）。
           const live = await collectLive(ctx, selfId)
-          if (live !== null) {
-            // ② 单模式失败：回填 caps 对应数据，并在渲染时标 [snapshot]。
-            let caps = null
-            let capsLoaded = false
-            const rows = []
-            for (const row of live) {
-              if (row.live === true) {
-                rows.push(row)
-                continue
-              }
-              if (!capsLoaded) {
-                const loaded = loadPresetCaps()
-                caps = loaded.ok ? loaded.caps : null
-                capsLoaded = true
-              }
-              const entry = caps?.presets?.[row.id]
-              const tools = Array.isArray(entry?.tools) ? entry.tools.map(String) : []
-              rows.push({ id: row.id, tools, skills: [], live: false, unknown: entry === undefined })
-            }
-            const rendered = renderRows(rows)
+          if (live === null) {
             return {
               ok: true,
-              message: rendered.text,
-              ...rendered.degraded.length === 0 ? {} : { degraded: rendered.degraded },
+              message: 'live roster unavailable: agentPresets.acquireScope is missing',
+              degraded: ['live-roster-unavailable'],
             }
           }
-
-          // ③ 兜底：接口缺失（老宿主）→ 完全走现有 loadPresetCaps()/错误串路径。
-          const loaded = loadPresetCaps()
-          if (!loaded.ok) {
-            // ⚠️ 2026-11-15（v3）：老格式（v1/v2）不兼容，明确回 preset-caps-invalid，不回退包内默认。
-            if (loaded.reason === 'preset-caps-invalid') {
-              return failure(
-                'preset-caps-invalid',
-                'preset-caps.json is not in the v3 format (old v1/v2 formats are no longer supported; ' +
-                  'there is NO fallback to the package defaults). Details:\n  ' +
-                  loaded.errors.join('\n  ') +
-                  '\n\nFix or rewrite the file (v3 format: docs/preset-bench.md); it needs version:3 / scope / ' +
-                  'baseline / baselineTools and, per mode, tools/toolCount/suitableFor/notSuitableFor. ' +
-                  '`delegate` still works for any mode id you already know.',
-                {
-                  stop: false,
-                  nextAction: 'fix ~/.dsh/blackpig-preset-caps.json (v3 format)',
-                },
-              )
-            }
-            return failure(
-              'preset-caps-missing',
-              'No preset baseline data found (未找到基准数据). Looked for ' +
-                '~/.dsh/blackpig-preset-caps.json and <package>/defaults/preset-caps.json:\n  ' +
-                loaded.errors.join('\n  ') +
-                '\n\nWrite the file by hand (v3 format: docs/preset-bench.md) at ~/.dsh/blackpig-preset-caps.json. ' +
-                'Until then the roster cannot be rendered; `delegate` still works ' +
-                'for any mode id you already know.',
-              {
-                stop: false,
-                nextAction: 'create ~/.dsh/blackpig-preset-caps.json (v3 format: docs/preset-bench.md)',
-              },
-            )
-          }
-          const rendered = renderRows(rowsFromCaps(loaded.caps, selfId))
+          const rendered = renderRows(live)
           return {
             ok: true,
             message: rendered.text,

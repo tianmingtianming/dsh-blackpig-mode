@@ -846,7 +846,7 @@ export function apply(ctx, config) {
   // ⚠️ 2026-11-07 修（R6，B-7）：日志与注册动作**分开**。走到这里说明
   // `ctx.tools.register()` 已经正常返回，工具确实注册成功；此时 `logger.info`
   // 抛错只能说明「日志通道异常」，绝不能落进上面的 register-failed 把结论翻成
-  // 「没注册」（member-persona:243-248 已明确禁止这种取向）。
+  // 「没注册」（旧人格模块:243-248 已明确禁止这种取向）。
   try {
     ctx.logger?.info?.(
       `blackpig-model/file-info: ${ENGAGED} — registered read-only tool "${TOOL_NAME}" on ctx.fs.resolve()+stat()`,
