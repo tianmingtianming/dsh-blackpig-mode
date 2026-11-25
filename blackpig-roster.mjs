@@ -401,6 +401,30 @@ async function writeToolsCache(ctx, path, mutate, warn) {
 }
 
 /**
+ * 等一次 `startActivation()` 的子会话真正跑完。
+ *
+ * ⚠️ 2026-11-25 新增（BUG1 根因）：宿主的 `activation.result` 是
+ * `Promise.withResolvers()` 的 **resolver 对象**（`{ promise, resolve, reject }`），
+ * **不是 thenable** —— `await` 它会在 0ms 返回（实测 elapsed=0），子会话根本没跑，
+ * 于是请求头还没写出就读，`readRealTools()` 一律 null ⇒ 9 个模式全员 `~reg`。
+ * 宿主真正暴露的等待入口是 `activation.result.promise`（`dsh-subagent/lib/index.js:2211`）。
+ *
+ * 三种形态都吃下，避免宿主换实现时静默退回「不等」：
+ *   · thenable（直接可 await）→ await 它；
+ *   · `{ promise }`（当前宿主）→ await `.promise`；
+ *   · 两者都没有 → 立即返回（拿不到等待入口，本函数不制造假等待）。
+ *
+ * @param activation - `subagents.startActivation()` 的返回值。
+ * @returns `Promise<void>`，子会话结束（或拿不到等待入口）时 resolve。
+ */
+async function awaitActivation(activation) {
+  const result = activation?.result
+  if (result === undefined || result === null) return
+  const awaited = typeof result.then === 'function' ? result : result.promise
+  if (awaited !== undefined && awaited !== null && typeof awaited.then === 'function') await awaited
+}
+
+/**
  * 从**活注册表**实时派生每个已安装模式的工具清单与技能清单。
  *
  * 每个模式通过 `agentPresets.acquireScope(id)` 拿到该 preset 的 ScopeKey，
@@ -466,8 +490,14 @@ async function collectLive(ctx, selfId, options = {}) {
   const latestChildCapture = async (presetId, cached) => {
     const subagents = get('subagents')
     if (typeof subagents?.listDescendants !== 'function') return null
+    // ⚠️ 2026-11-25 修：宿主签名是 `listDescendants(rootSessionId, signal)`
+    // （dsh-subagent/lib/types/list-children.js），**必须传根会话 id**。
+    // 原来无参调用 ⇒ 每次都抛 SUBAGENT_CONTROL_SESSION_STORE_UNAVAILABLE，被下面 catch 吞掉，
+    // 「免费回看」这条路径等于不存在（不影响 liveCapture 兜底，但白丢唯一免派探针的机会）。
+    const rootId = typeof parent?.id === 'string' && parent.id !== '' ? parent.id : null
+    if (rootId === null) return null
     try {
-      const listed = await subagents.listDescendants()
+      const listed = await subagents.listDescendants(rootId)
       if (!Array.isArray(listed)) return null
       const candidates = listed
         .filter((row) => row !== null && typeof row === 'object')
@@ -512,13 +542,27 @@ async function collectLive(ctx, selfId, options = {}) {
         label: `probe ${presetId} tools`,
         request,
         ...request,
+        // ⚠️ 2026-11-25 修（BUG1 真因）：这里原来漏了 `signal`。宿主
+        // `SubagentActivationSpec.signal` 是**必填**，`manager.trackStartup()` 第一句就是
+        // `signal.throwIfAborted()`（dsh-subagent/lib/manager.js:642）⇒ undefined 直接
+        // TypeError，被本函数 catch 吞成 warn，9 个模式全部退回注册面并标 `~reg`。
+        // delegate 路径（本文件 :1311）一直传 `signal: exec?.signal`，所以派活正常、只有探针挂。
+        signal: options.signal,
         delivery: 'parent',
       })
       const childId = typeof activation?.childId === 'string' && activation.childId !== '' ? activation.childId : null
       if (childId === null) return null
       // 必须等它跑完：请求头只在子会话真的发出过一次请求之后才存在。
+      //
+      // ⚠️ 2026-11-25 修（BUG1，1.1.0 原地覆盖）：原来写的是 `await activation.result`，
+      // 那**不会等**任何东西。宿主 `subagents.startActivation()` 回的 `activation.result`
+      // 是 `Promise.withResolvers()` 的 **resolver 对象**（`{ promise, resolve, reject }`），
+      // 不是 thenable —— `await` 一个普通对象在 0ms 内就返回（实测 elapsed=0）。
+      // 后果：子会话刚创建、还没发出过任何请求，`readRealTools()` 读到的是「没有请求头」
+      // → 返回 null → 每个模式都退回注册面并标 `~reg`（9 个模式全员 `~reg` 的真因）。
+      // 宿主真正暴露的等待入口是 `activation.result.promise`（`dsh-subagent/lib/index.js:2211`）。
       try {
-        await activation.result
+        await awaitActivation(activation)
       } catch {
         // 子会话失败也让下面的读取试一次：失败前可能已经记下请求头。
       }
@@ -851,15 +895,21 @@ function renderRows(rows) {
       : []
     const skillPart = skillNums.length > 0 ? ` | ${compressSkillRuns(skillNums)}` : ''
     const regPart = row.source === 'registered' ? ' ~reg' : ''
-    lines.push(`- ${row.id}: ${compressRuns(nums)}${skillPart}${regPart}`)
-    // 执行器模式（ptc）的说明紧跟在该行下面；编号由上面的首现发号产生，此处只取不造。
+    // ⚠️ 2026-11-25 修（BUG2，1.1.0 原地覆盖）：执行器模式（ptc）**只出一行**。
+    // 原来先无条件 push 一条 `- ptc: [058] | s[…]`（本行），下面又 push 一条
+    // `- ptc: [058] — 说明…`，同一个模式出现两次（用户实测：`list:true` 里 ptc 有两行）。
+    // 现在执行器分支接管这一行：编号 + 技能 + 说明写在同一行，说明的续行仍缩进两格。
     if (row.source === 'executor') {
       const n = numbering.get(PTC_TOOL)
       if (typeof n === 'number') {
-        lines.push(`- ${row.id}: [${num3(n)}] — ${PTC_EXPLANATION[0]}`)
+        lines.push(`- ${row.id}: [${num3(n)}]${skillPart} — ${PTC_EXPLANATION[0]}`)
         for (const extra of PTC_EXPLANATION.slice(1)) lines.push(`  ${extra}`)
+      } else {
+        lines.push(`- ${row.id}: ${compressRuns(nums)}${skillPart}${regPart}`)
       }
+      continue
     }
+    lines.push(`- ${row.id}: ${compressRuns(nums)}${skillPart}${regPart}`)
   }
 
   return { text: lines.join('\n'), degraded }
@@ -1472,7 +1522,7 @@ export function apply(ctx, config) {
       async execute(args, exec) {
         if (args?.list === true) {
           // 1.1.0：`list: true` 允许当场实测（派探针、**等它跑完**再读请求头），不设超时。
-          const live = await collectLive(ctx, selfId, { capture: true, parent: exec?.agent ?? null, cachePath, config })
+          const live = await collectLive(ctx, selfId, { capture: true, parent: exec?.agent ?? null, signal: exec?.signal, cachePath, config })
           if (live === null) {
             return {
               ok: true,

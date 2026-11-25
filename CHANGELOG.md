@@ -1,5 +1,86 @@
 # Changelog — dsh-blackpig-mode
 
+## 2026-11-26 v1.1.0 **再次原地覆盖**（版本号不变）：探针缺 `signal` = BUG1 真因
+
+> **版本号仍是 1.1.0**，**不建新 tag**。`gh release upload v1.1.0 --clobber` 覆盖同一资产，
+> `package.json` 的 `version` 未动。上一节（2026-11-25）的记录保持原文不删，本节是它的**修正**。
+
+### BUG1 真因：`startActivation()` 的 spec 少了必填的 `signal`
+
+- **上一版为什么没修好**：2026-11-25 那版修的是「等」——把 `await activation.result` 改成等
+  `activation.result.promise`。但探针**在创建阶段就抛了**，`activation` 根本没拿到，那条等待代码
+  一次都没执行到。当时的离线 mock 没复刻宿主对 `signal` 的硬校验，所以 mock 显示「修好了」。
+- **根因**：`subagents.startActivation(spec)` 的 `spec.signal` 是**必填**。宿主
+  `SubagentActivationSpec` 的 `signal` 缺失时，`manager.trackStartup()` 第一句
+  `signal.throwIfAborted()`（`dsh-subagent/lib/manager.js:642`）直接抛 **TypeError**
+  （`Cannot read properties of undefined (reading 'throwIfAborted')`）。该异常被 `liveCapture()` 的
+  `try/catch` 吞成一条 warn，`liveCapture()` 返回 `null` ⇒ 每个模式都退回 `tools.view()` 注册面并标
+  `~reg` ⇒ **9 个模式全员 `~reg`，表现为静默回退，日志里只有一条不显眼的 warn**。
+- **对照组**：`delegate` 路径（`blackpig-roster.mjs` 的 `:1311`）一直传 `signal: exec?.signal`，
+  所以**派活正常、只有探针挂**——这也是为什么之前容易误判成「等待逻辑坏了」。
+- **修法**：`collectLive()` 调用点补 `signal: exec?.signal`；探针 `startActivation` 的 spec 补
+  `signal: options.signal`。
+- **离线 harness 复现/验证**（`%TEMP%\bp-harness\harness.cjs`，忠实复刻
+  `spec.signal.throwIfAborted()` 与 `activation.result` 的 resolver 对象形态）：
+  ```
+  修前（生产包 71087 B）：~reg = 9 ; startActivation 抛 TypeError → 全部退回注册面
+  修后（本版 72198 B）  ：~reg = 0 ; startActivation 调用 8 次全成功 ; 缓存写满 1844 B
+  二次调用              ：0 次探针（走缓存），4 ms
+  ```
+
+### 附带修复：`listDescendants()` 必须传 `rootSessionId`
+
+- **根因**：宿主签名是 `listDescendants(rootSessionId, signal)`（`dsh-subagent/lib/types/list-children.js`），
+  原来**无参调用** ⇒ 每次都抛 `SUBAGENT_CONTROL_SESSION_STORE_UNAVAILABLE`，被 `catch` 吞掉。
+  后果不是名册坏掉（还有派探针兜底），而是「免费回看已结束子会话」这条路径**等于不存在**，
+  每次都得白派一个探针。
+- **修法**：`latestChildCapture()` 改为 `listDescendants(rootId)`，`rootId` 取 `parent?.id`；
+  `rootId` 为空时直接返回 `null`（不再发无参调用去撞异常）。
+
+### 其它
+
+- `verify.ps1` 字节表同步：`blackpig-roster.mjs` 71087 → **72198**。
+- 包内 `README.md` / `CHANGELOG.md` 同步（`~reg` 三级取数章节补两条 ⚠️ 修复说明）。
+- 三处修复**只动 `blackpig-roster.mjs`**；`inject` 仍是 `['tools', 'subagents', 'agentPresets']`，
+  `package.json` 的 `version` 仍是 `1.1.0`，`files[]` 仍是 11 项。
+
+## 2026-11-25 v1.1.0 **原地覆盖**（版本号不变）：修两个实测 bug
+
+> **版本号 1.1.0 保持不变**，未建新 tag。按用户裁定「版本号更新用户说了算，不说就默认覆盖」
+> 与纪律「原地覆盖当前版本」，用 `gh release upload v1.1.0 --clobber` 覆盖 v1.1.0 的 Release 资产。
+> （同日更早那次 1.1.0 发布保持原文不删，见下一节；本节是它的**修补覆盖**。）
+
+### BUG1（致命）：`list: true` 里所有非 ptc 模式全部 `~reg`，实测路径全挂
+
+- **现象**：9 个模式全部退到注册面并标 `~reg`；ptc 正常（它走执行器特判、不实测）。
+- **根因**：`liveCapture()` 里写的是 `await activation.result`。宿主 `subagents.startActivation()`
+  返回的 `activation.result` 是 `Promise.withResolvers()` 的 **resolver 对象**
+  （`{ promise, resolve, reject }`），**不是 thenable** —— `await` 一个普通对象会在 **0 ms** 内返回
+  （实测 `typeof result = object` / `result.then = undefined` / `elapsed = 0`）。
+  后果：探针子会话**刚创建、还没发出任何请求**，紧接着 `readRealTools()` 读请求头拿到「没有请求头」
+  → 返回 `null` → 每个模式都退回注册面并标 `~reg`。
+  宿主真正暴露的等待入口是 `activation.result.promise`（`dsh-subagent/lib/index.js:2211`）。
+- **修法**：新增模块级 `awaitActivation(activation)`，兼容三种形态（thenable / `{ promise }` / 都没有），
+  `liveCapture()` 改为 `await awaitActivation(activation)`。**没有**把 `inject` 加任何服务。
+- **实测对照**（同样复刻宿主 resolver 对象形态，子会话 300 ms 后才写出请求头）：
+  ```
+  BEFORE  - standard: [001-003] ~reg            ptc 两行    elapsed 1ms   （根本没等）
+  AFTER   - standard: [001-004]                 ptc 一行    elapsed 314ms （真的等了）
+  ```
+
+### BUG2：`list: true` 里 ptc 输出两行
+
+- **根因**：`renderRows()` 先**无条件** push 一条 `- ptc: [058] | s[…]`，随后 `if (row.source === 'executor')`
+  又 push 一条 `- ptc: [058] — <说明…>`，同一个模式出现两次。
+- **修法**：执行器分支**接管**这一行——编号 + 技能 + 说明写在同一行（`- ptc: [NNN] | s[…] — 说明`），
+  说明续行仍缩进两格；非执行器行保持原样。
+
+### 其它
+
+- `verify.ps1` 字节表同步：`blackpig-roster.mjs` 68514 → **71087**。
+- 包内 `README.md` 同步名册章节（实测行为、`~reg` 含义、ptc 单行）。
+- 两处修复都**只动 `blackpig-roster.mjs`**；`inject` 仍是 `['tools', 'subagents', 'agentPresets']`。
+
 ## 2026-11-25 v1.1.0：名册显示**真实工具面**（不再拿注册面冒充）
 
 > 版本号 **1.0.10 → 1.1.0**（`package.json` 的 `version` 已 bump）。

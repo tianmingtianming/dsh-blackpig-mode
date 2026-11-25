@@ -123,14 +123,14 @@ function Find-PresetDeclaration {
 $expected = [ordered]@{
     'cordis.patch.yml'    = 0   # 不参与严格字节校验（人格随编辑变化；5/5 用段数+needle 断言）
     'guard-v10.mjs'       = 192713   # 2026-11-24：DEFAULT_KEEP 删 wait_agent + 相关死提示
-    'blackpig-roster.mjs' = 68514   # 2026-11-25：1.1.0 名册显示真实工具面 + ptc 说明行
+    'blackpig-roster.mjs' = 72198   # 2026-11-26：1.1.0 再次原地覆盖（BUG1 探针缺 signal + listDescendants(rootId)）
     'subtalk.mjs'         = 57920   # 2026-11-24：send/stop 描述保守精简
     'file-info.mjs'       = 39726   # 2026-11-24：描述保守精简（list:true/8192B 保留）
     'section-mute.mjs'    = 2537    # 2026-11-24 新增：空文本段遮蔽 harness:source / app:web-surface
     'compat.mjs'          = 57537   # 2026-11-24：applyToTools 的 agent 描述压缩
     'package.json'        =  708   # 1.1.0：files[] 11 项（删 blackpig-anchor.mjs）；无 BOM
-    'README.md'           = 60733   # 记录值；仍在 skipSizeCheck（随文档编辑变化）
-    'CHANGELOG.md'        = 23551   # 记录值；仍在 skipSizeCheck（随文档编辑变化）
+    'README.md'           = 63977   # 记录值；仍在 skipSizeCheck（随文档编辑变化）
+    'CHANGELOG.md'        = 38138   # 记录值；仍在 skipSizeCheck（随文档编辑变化）
     'LICENSE'             = 1073
     'check.ps1'           = 0       # 在 $skipSizeCheck 里，不参与比对
     'verify.ps1'          = 0       # 自引用：写死自身字节必然追不上，不参与校验

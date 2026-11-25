@@ -265,6 +265,41 @@ Skill index (12):
 - 每模式只列编号区间：**不再有 `(N tools)` 计数、`suitable:` 两行、`skills:` 行及其 `only in` 子句**。
 - 单模式取不到（`broken` 或 `acquireScope` 抛错）时**仍保留该行**，写 `- <id>: — [unknown]`（不许吞行）。
 
+### 工具面三级取数（v1.1.0 起）
+
+行上的编号**优先是「模型真能直接调用的那批」**，不是「注册了的那批」：
+
+| 来源 | 什么时候用 | 渲染 |
+| --- | --- | --- |
+| `executor` | 挂了 `@deepseek-ai/dsh-tool-executor-ptc` 的模式 | 固定 `run_code`，**不实测、不缓存** |
+| `captured` | 缓存命中，或当场实测成功 | 真实工具表编号 |
+| `registered` | 实测拿不到，退回 `tools.view()` 注册面 | 编号后缀 **` ~reg`** |
+
+`~reg` 是**诚实标注**：那些编号是「注册了」，不等于「模型真能直接调」。看到 `~reg` 说明这次实测没跑通，
+不是名册坏了。
+
+实测路径：缓存未命中 → 先回看该 preset **已结束**的子会话（免费采样）→ 没有才当场派一个极短探针子代理
+（`reply OK`），**等它跑完**（`activation.result.promise`）再读 `request/header.tools`。
+首次 `list: true` 因此会慢（本机实测约 28 s），成功后写缓存
+`${DSH_HOME}/profiles/desktop/preset-tools-cache.json`，之后走缓存只剩回看。
+
+> ⚠️ **2026-11-25 修复（原地覆盖 v1.1.0）**：此前写的是 `await activation.result`，而宿主返回的
+> `activation.result` 是 `Promise.withResolvers()` 的 **resolver 对象**（不是 thenable），`await` 在 0 ms
+> 返回 ⇒ 探针刚创建就读请求头 ⇒ 所有非 ptc 模式全员 `~reg`。现已改为等 `activation.result.promise`。
+
+> ⚠️ **2026-11-26 修复（同一版本再次原地覆盖）**：上一版只修了「等」，但探针**根本派不出去**——
+> `subagents.startActivation()` 的 spec 漏了必填的 **`signal`**，宿主 `manager.js:642` 第一句就是
+> `signal.throwIfAborted()` ⇒ `undefined` 直接 TypeError，被本模块 catch 吞成一条 warn，9 个模式全员
+> 静默退回注册面并标 `~reg`。`delegate` 路径一直传 `signal: exec?.signal`，所以**只有探针挂、派活正常**。
+> 现已补 `signal: options.signal`。同一轮还修了 `listDescendants()`：宿主签名是
+> `listDescendants(rootSessionId, signal)`，**必须传根会话 id**，无参调用必抛
+> `SUBAGENT_CONTROL_SESSION_STORE_UNAVAILABLE`，「免费回看」这条路径此前等于不存在。
+
+### ptc 说明行（v1.1.0 起）
+
+执行器模式（`ptc`）**只输出一行**：`- ptc: [NNN] | s[…] — Programmatic Tool Calling. …`，
+说明续行缩进两格。此前它会先输出一条纯编号行、再输出一条说明行，同一模式出现两次（已修）。
+
 三件事分清楚：
 
 | 想做的事 | 怎么做 | 效果 |
