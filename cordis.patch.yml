@@ -307,6 +307,18 @@
           config:
             enabled: true
             selfPresetId: blackpigmodel
+            # ── 2026-11-25（1.1.0）：工具面缓存的落盘位置 ──
+            #
+            # 默认不写这一行：插件按**本次进程的 `DSH_HOME`** 推出
+            # `${DSH_HOME}/profiles/desktop/preset-tools-cache.json`
+            # （`DSH_HOME` 未设置则退 `homedir()/.dsh`，与 `dsh-home-paths` 的
+            #  `defaultDshHome()` 同口径）。
+            #
+            # 要换位置就在这里配**绝对路径**（或相对 cwd 的路径）。为什么不能靠 `~`：
+            # 宿主 `fs` 的 `expandHomePrefix()` 走 `os.homedir()`，而它只看 USERPROFILE、
+            # 与 `DSH_HOME` 无关 —— 用 `~` 会让隔离实例（临时 DSH_HOME）写进生产 profile。
+            # 非 desktop profile 的部署建议显式配置，否则多个 profile 共用同一份缓存。
+            # toolsCachePath: "D:/some/profile/preset-tools-cache.json"
             # ── 2026-11-02 通用化：人工边界（白名单/黑名单）**全部删除** ──
             #
             # 原配置有两层名单：

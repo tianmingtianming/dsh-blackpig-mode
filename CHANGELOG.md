@@ -1,5 +1,31 @@
 # Changelog — dsh-blackpig-mode
 
+## 2026-11-25 v1.1.0：名册显示**真实工具面**（不再拿注册面冒充）
+
+> 版本号 **1.0.10 → 1.1.0**（`package.json` 的 `version` 已 bump）。
+
+- **根因**：`subagent_preset({ list: true })` 的工具区间取自 `tools.view(scope).visible` —— 那是该 scope 下**已注册**的工具集，不等于模型实际下发的工具表。executor 类模式最典型：`ptc` 注册了整套被代理的工具，模型真正能直接调的只有 `run_code`，名册却把整套都列了出来。
+- **改为实测值**：新增 `readRealTools(ctx, childId)`，数据链 `sessionQuery.readSession(childId)` → 折叠 `request/header` 事件 → `header.tools`（= 模型当时看到的真表）。新建会话没有请求头时返回 `null`，任何异常也 `null`，绝不把「读不到」当成「零个工具」。
+- **折叠实现放在本包内**（`foldLastRequestHeader()`）：**没有** `import { foldRequestHeader } from '@deepseek-ai/dsh-session'`。2026-11-25 实测该裸包在本部署两个解析根下都 `ERR_MODULE_NOT_FOUND`（profile 的 `node_modules\@deepseek-ai` 只有 `cosmokit` / `schemastery`，宿主包在 `app.asar` 里），ESM 静态 import 在装载期解析失败会让整个 `blackpig-roster` 起不来、工具与 `delegate` 一起消失。折叠判据与上游等价：遍历事件取**最后一条** `request/header` 的 `data.header`。
+- **ptc 特判**：挂载了 `@deepseek-ai/dsh-tool-executor-ptc` 的模式（本部署即 `ptc`）固定返回 `['run_code']`，**不实测、不缓存**；名册在该行下面另出一段 5 行说明（Programmatic Tool Calling / 什么时候用 / 只有 `run_code` 可直接调）。说明行里的编号由全局首现发号自动产生，不硬编码。
+- **首次实测 + 被动采集 + `~reg` 回退**（三级取数）：
+  1. ptc 执行器 → `run_code`（`source: executor`）；
+  2. 缓存命中 → 用缓存值（`source: captured`）；
+  3. 缓存未命中 → 先回看该 preset **已结束**、且比缓存新的子会话（免费采样），没有才当场派一个极短子代理（`reply OK`，**等它跑完**、不设超时）再读请求头；成功即写缓存（`source: captured`）。
+  实测拿不到时退回 `tools.view()` 的注册面并标 `source: registered`，渲染成编号后带 ` ~reg`：那些编号是「注册了」而不是「模型真能直接调」，不许伪装成实测值。
+- **被动采集**：`delegate` 成功路径把 `{ presetId → childId }` 记进缓存（**只记 childId，不覆盖已有 `tools` / `capturedAt`**），下次 `list: true` 就能回看该子会话刷新工具表，省掉再派探针。
+- **缓存文件**：路径优先取 `config.toolsCachePath`（`cordis.patch.yml` 可配）；未配置时由**本次进程的 `DSH_HOME`** 推出 `${DSH_HOME}/profiles/desktop/preset-tools-cache.json`（`DSH_HOME` 未设置则退 `homedir()/.dsh`，与 `dsh-home-paths` 的 `defaultDshHome()` 同口径）。**代码里不写死 `~` 或任何机器路径**：`fs.readText` 会经 `expandHomePrefix()` → `os.homedir()` 展开，而 `homedir()` 只看 USERPROFILE、与 `DSH_HOME` 无关 ⇒ 隔离实例（临时 `DSH_HOME`）会把缓存写进生产 profile，多 HOME 互踩。结构：`{ "version": 1, "presets": { "<id>": { "tools": [...], "capturedAt": <epochMs>, "childId": "..." } } }`。读失败 / 不存在 / 结构不符 → 空表、不抛；写失败只 `warnOnce` 一次，绝不阻塞名册；写入意图按 `fs.stat()` 的结果分三支：文件存在且 `FsInfo.version` 可用 → `{ kind: 'replaceIfVersion', version }`（版本令牌**只能**来自 `stat()`，宿主契约明写 `MUST NOT interpret this token`，不许自己造）；文件不存在 → `{ kind: 'createIfAbsent' }`；create 撞上已存在 → 重读拿版本再替换。任何写失败（含 `FS_STALE_VERSION`）只 warn 一次，名册不受影响。
+- **`inject` 未动**：仍是 `['tools', 'subagents', 'agentPresets']`。`sessionQuery` / `fs` / `skills` / `workingDirectory` 一律用 `ctx.get()` 按需取，取不到就降级 —— 往 `inject` 里加拿不到的服务会让整个插件静默失活。
+- **已知限制**：
+  - 实测要**真的派一个子代理并等它跑完**（用户要求不设超时），首次 `list: true` 因此会慢，并消耗一次极小子会话；缓存命中后只剩回看（无新建会话）。
+  - 工具表只会**事后刷新**：某模式升级了插件、但缓存的 `capturedAt` 比新会话还新时，回看会跳过它，仍显示旧表，直到该子会话比缓存更新或缓存被删。想强制重测就删缓存文件。
+  - 缓存按 preset id 存，**不区分 DSH 版本**；宿主升级后工具面可能变，删缓存即可重测。
+  - 取不到插件表（`agentPresets.plugins()` 不可用）时，ptc 只能按 `row.id === 'ptc'` 兜底判据识别；其他 executor 类模式会被当成普通模式实测。
+  - 回看依赖 `subagents.listDescendants()` 与行上的 `agentPreset` / `createdAt` 字段；字段缺失时只是少一次免费采样，不影响当场实测。
+  - 缓存路径默认按 `DSH_HOME` 推导，但**profile 目录名仍写死 `desktop`**：非 desktop profile 的部署要显式配 `config.toolsCachePath`，否则多个 profile 会共用同一份缓存（只是缓存，最坏是互相加速、不会损坏）。
+- **打包（缺陷已定位，脚本未改）**：`tools/build-blackpig-tgz.mjs` 的 `walk()` 收 staging 下的**全部**条目，**不读 `package.json` 的 `files[]`、也不过掉点文件**。拿仓库根当 `--staging .` 打，条目数 **278**、其中 `.git` 占 **264**（含 `.git/COMMIT_EDITMSG`）= 2 MB 级 tgz。⇒ 打 1.1.0 的包**必须**先建干净 staging（只拷 `files[]` 的 11 个文件、不递归、不含 `.git`），再从 staging 打；打完用 `tar -tzf | grep -c '^\.git/'` 应为 **0**。
+- `verify.ps1` 期望字节同步：`blackpig-roster.mjs` 46944 → **68514**（初版 64274，含本轮三个缺陷修复）、`package.json` 709 → **708**（BOM 保留）。
+
 ## 2026-11-24 追加（版本号不 bump，仍 1.0.10）：可控工具描述保守精简
 
 - 只精简黑猪自注册的 4 个工具描述，防误用语义全保留：`subagent_preset` 963→895 B（保留先 list:true、按能力区间选、reuseId/fresh 判据原文不动）、`send_to_subagent` 1064→651 B（保留 messageId 只证明入队、interruptVerified=false、下一轮投递）、`stop_subagent` 634→483 B（保留 send_to_subagent 先请求 interrupt）、`file_info` 846→541 B（保留 list:true 与 200 条/8192 B 上限）。

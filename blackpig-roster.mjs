@@ -11,6 +11,14 @@
  *
  * 派活（`delegate`）仍然走**活校验**：`registry.list()` 确认目标模式真实存在且没坏。
  *
+ * ── 1.1.0（2026-11-25）：工具面改为**实测值** ──────────────────────────────
+ * `tools.view(key).visible` 是该 scope 下**已注册**的工具集，不等于模型实际下发的工具表
+ * （executor 类模式如 ptc 只把 `run_code` 下发，注册面里却是整套被代理的工具）。现在三级取数：
+ *   ① ptc 特判 —— 挂载了 `@deepseek-ai/dsh-tool-executor-ptc` 的模式固定 `['run_code']`（不实测、不缓存）；
+ *   ② 缓存命中 —— `~/.dsh/profiles/desktop/preset-tools-cache.json` 里该 preset 的最近实测值；
+ *   ③ 当场实测 —— 派一个极短子代理跑完，再读它子会话的 `request/header.tools`（= 模型看到的真表）。
+ * 实测拿不到时退回注册面并标 `~reg`，绝不把注册面伪装成实测值。
+ *
  * ── 2026-11-24：可续 worker 复用硬判据 ──────────────────────────────────────
  * 当调用方存在 `mode === 'continuable'` 的直接子会话时，`delegate` 要求**显式二选一**：
  *   · `reuseId` —— 冷恢复既有 worker（走 compat.callSendMessage，不新建子会话）；
@@ -21,6 +29,9 @@
  *
  * @module blackpig-model/blackpig-roster
  */
+
+import { homedir } from 'node:os'
+import { join } from 'node:path'
 
 import { callSendMessage, readCallerChildCatalog, resolveTargetId } from './compat.mjs'
 
@@ -156,19 +167,265 @@ async function currentCwd(ctx) {
 }
 
 /**
+ * 实测工具表缓存文件的**默认**位置（只在没配 `config.toolsCachePath` 时用）。
+ *
+ * ⚠️ 历史（2026-11-25 修，1.1.0 内部修订）：这里曾写死 `~/.dsh/profiles/desktop/...`。
+ * 两个错：① `~` 由 `fsio.ts` 的 `expandHomePrefix()` → `os.homedir()` 展开，而 `homedir()`
+ * **只看 USERPROFILE，与 `DSH_HOME` 无关**（`dsh-home-paths` 的 `resolveDshHome` 才读
+ * `DSH_HOME`）⇒ 隔离实例（临时 DSH_HOME）会把缓存写进生产 profile，多 HOME 互踩；
+ * ② `profiles/desktop` 是**本机**的 profile 名，别的部署未必叫这个。
+ *
+ * 现在：路径优先取 `config.toolsCachePath`（`cordis.patch.yml` 可配）；没配时**退化为
+ * 「本次进程的 DSH_HOME + 本 profile 目录」**（见 `toolsCachePathOf()`），绝不写死机器路径。
+ * 为什么不用 `resolveDshHome()` / `dshHomePath()`：这两个是 `@deepseek-ai/dsh-home-paths`
+ * 的**裸模块导出**，不是 `ctx` 服务（本部署里 `@deepseek-ai` 只装了 `cosmokit` /
+ * `schemastery`，宿主包在 app.asar 里，import 必 `ERR_MODULE_NOT_FOUND`）。
+ */
+const DEFAULT_TOOLS_CACHE_RELATIVE = join('profiles', 'desktop', 'preset-tools-cache.json')
+
+/** 缓存文件结构版本；结构一变就 bump，读到旧版本按空缓存处理。 */
+const TOOLS_CACHE_VERSION = 1
+
+/** ptc 执行器插件名：挂载了它的模式，模型只直接看得见 `run_code`。 */
+const PTC_EXECUTOR_PLUGIN = '@deepseek-ai/dsh-tool-executor-ptc'
+
+/** ptc 模式暴露给模型的唯一工具。 */
+const PTC_TOOL = 'run_code'
+
+/** 当场实测时派给子代理的那一句：唯一的目的是让子会话发一次请求、留下 `request/header`。 */
+const PROBE_PROMPT = 'reply OK'
+
+/**
+ * 从事件流里取最后一个请求头（`request/header`）—— 本包内的等价折叠实现。
+ *
+ * ⚠️ 为什么**不** `import { foldRequestHeader } from '@deepseek-ai/dsh-session'`：
+ * 该裸包在本部署的两个解析根下都 `ERR_MODULE_NOT_FOUND`（实测 2026-11-25）——
+ * profile 的 `node_modules\@deepseek-ai` 只有 `cosmokit` / `schemastery`，宿主包在
+ * `resources\app.asar` 里。ESM 静态 import 在模块装载期解析，解析失败会让整个
+ * `blackpig-roster` 起不来、工具与 `delegate` 一起静默消失（`inject` 也救不回来）。
+ * `compat.mjs` 的「不深引宿主内部模块」纪律同理。所以这里自己折叠：
+ * 遍历 events，取**最后一条** `request/header` 的 `data.header`。
+ *
+ * @param events - `sessionQuery.readSession()` 返回的事件数组（裸事件 `{ type, data }`）。
+ * @returns 最后一个请求头，没有则 `undefined`。
+ */
+function foldLastRequestHeader(events) {
+  if (!Array.isArray(events)) return undefined
+  let last
+  for (const item of events) {
+    if (item === null || typeof item !== 'object') continue
+    const type = item.type ?? item.value?.type
+    if (type !== 'request/header') continue
+    const header = item.data?.header ?? item.value?.data?.header ?? item.value?.header
+    if (header !== undefined && header !== null) last = header
+  }
+  return last
+}
+
+/**
+ * 读某子会话**真实下发**的工具表（模型可直接调用的那批）。
+ *
+ * 数据链：`sessionQuery.readSession(childId)` → `foldRequestHeader(events)` → `header.tools`。
+ * 与 `tools.view(key).visible` 的区别：后者是该 scope 的**注册**面，executor 模式（ptc）
+ * 注册一堆、只下发 `run_code`。想回答「这个模式真正能用什么」只能读请求头。
+ *
+ * @param ctx - 插件上下文。
+ * @param childId - 子会话 id。
+ * @returns 工具名数组；会话还没发过请求（无请求头）或任何异常 → `null`。
+ */
+async function readRealTools(ctx, childId) {
+  if (typeof childId !== 'string' || childId.trim() === '') return null
+  try {
+    const sessionQuery = typeof ctx?.get === 'function' ? ctx.get('sessionQuery') : undefined
+    if (typeof sessionQuery?.readSession !== 'function') return null
+    const session = await sessionQuery.readSession(childId)
+    const header = foldLastRequestHeader(session?.events)
+    // 新建会话还没发过请求 → 没有请求头 → 拿不到真实工具表（绝不是「零个工具」）。
+    if (header === undefined || header === null) return null
+    const tools = Array.isArray(header.tools) ? header.tools : []
+    const names = tools
+      .map((entry) => (typeof entry === 'string' ? entry : typeof entry?.name === 'string' ? entry.name : ''))
+      .filter((entry) => entry !== '')
+    return names
+  } catch {
+    return null
+  }
+}
+
+/**
+ * 某 preset 是否由 ptc 执行器决定工具面（`run_code` 单工具，注册面不可信）。
+ *
+ * @param pluginNames - `agentPresets.plugins(id)` 回的插件名数组（读不到时为 `null`）。
+ * @returns 是否按执行器口径处理。
+ */
+function isPtcexecutor(pluginNames) {
+  return Array.isArray(pluginNames) && pluginNames.includes(PTC_EXECUTOR_PLUGIN)
+}
+
+/**
+ * 缓存文件的绝对路径。
+ *
+ * 取法（按优先级，2026-11-25 实证，不写死任何机器路径）：
+ *   1. `config.toolsCachePath` —— 部署方显式配置（`cordis.patch.yml` 可改），相对路径按 cwd 解析；
+ *   2. `${DSH_HOME}/profiles/desktop/preset-tools-cache.json` —— 读**本次进程**的 `DSH_HOME`
+ *      （与 `dsh-home-paths` 的 `resolveDshHome` 同一条环境变量，宿主自己也是这么定位 home 的），
+ *      未设置时退回 `homedir()/.dsh`（与 `defaultDshHome()` 同口径）。
+ * 不写 `~`：`fs.readText`/`resolve` 会经 `expandHomePrefix()` → `os.homedir()` 展开，
+ * 而 `homedir()` 只看 USERPROFILE、与 `DSH_HOME` 无关 ⇒ 隔离实例会踩到生产 profile。
+ *
+ * @param ctx - 插件上下文。
+ * @param config - 模块配置（`toolsCachePath` 可选）。
+ * @returns 绝对路径；任何异常都退回默认推导（不抛）。
+ */
+function toolsCachePathOf(ctx, config) {
+  try {
+    const configured = typeof config?.toolsCachePath === 'string' ? config.toolsCachePath.trim() : ''
+    if (configured !== '') {
+      if (/[\\/]/.test(configured) || configured.startsWith('/')) return configured
+      return join(currentProcessCwd(), configured)
+    }
+    const env = process.env
+    const dshHome = typeof env?.DSH_HOME === 'string' && env.DSH_HOME.trim() !== '' ? env.DSH_HOME.trim() : join(homedir(), '.dsh')
+    return join(dshHome, DEFAULT_TOOLS_CACHE_RELATIVE)
+  } catch {
+    try {
+      return join(homedir(), '.dsh', DEFAULT_TOOLS_CACHE_RELATIVE)
+    } catch {
+      return DEFAULT_TOOLS_CACHE_RELATIVE
+    }
+  }
+}
+
+/** `process.cwd()` 的兜底版本（cwd 被删时会抛）。 */
+function currentProcessCwd() {
+  try {
+    return process.cwd()
+  } catch {
+    return '.'
+  }
+}
+
+/**
+ * 读缓存文件。返回内容与**那一次读到的版本令牌**（`fs.stat()` 的 `FsInfo.version`）。
+ *
+ * 宿主契约（`dsh-fs/src/types.ts`）：`FsInfo.version` 就是 `replaceIfVersion` 要的那个
+ * 不透明令牌；`stat()` 是 `fs` 上的公开方法，不需要额外 import。
+ * 版本令牌只能来自 `stat()`，**不许自己造**（`MUST NOT interpret this token`）。
+ *
+ * @param ctx - 插件上下文。
+ * @param path - 缓存文件绝对路径。
+ * @returns `Promise<{ presets, version }>`；任何失败都回 `{ presets: {}, version: undefined }`（不抛）。
+ */
+async function readToolsCache(ctx, path) {
+  const empty = { presets: {}, version: undefined }
+  try {
+    const fs = typeof ctx?.get === 'function' ? ctx.get('fs') : undefined
+    if (typeof fs?.resolve !== 'function' || typeof fs?.readText !== 'function') return empty
+    const target = await fs.resolve(path)
+    let version
+    try {
+      const info = typeof fs.stat === 'function' ? await fs.stat(target) : undefined
+      version = info !== undefined && info !== null ? info.version : undefined
+    } catch {
+      version = undefined
+    }
+    const text = await fs.readText(target)
+    const parsed = JSON.parse(String(text))
+    if (parsed === null || typeof parsed !== 'object') return empty
+    if (parsed.version !== TOOLS_CACHE_VERSION) return empty
+    const presets = parsed.presets
+    if (presets === null || typeof presets !== 'object' || Array.isArray(presets)) return empty
+    return { presets, version }
+  } catch {
+    return empty
+  }
+}
+
+/**
+ * 写缓存文件（整体替换 + 乐观并发）。
+ *
+ * 写入意图按 `stat()` 的结果分三支（`dsh-fs/src/types.ts:117-125` 的定义）：
+ *   · 文件存在且 `FsInfo.version` 可用 → `{ kind: 'replaceIfVersion', version }`；
+ *   · 文件不存在（或 stat 读不到）→ `{ kind: 'createIfAbsent' }`；
+ *   · create 撞上「已存在」→ 重来一次，这次落到上面两支之一。
+ * 任何写入失败（含版本冲突 `FS_STALE_VERSION`）只 warn 一次，绝不影响当前这次 `list: true`：
+ * 缓存是 best-effort，丢一次更新只是下次多实测一遍。
+ *
+ * @param ctx - 插件上下文。
+ * @param path - 缓存文件绝对路径。
+ * @param mutate - 收当前 presets 对象、就地修改。
+ * @param warn - `warnOnceFactory(ctx)` 的记录函数。
+ * @returns `Promise<void>`。
+ */
+async function writeToolsCache(ctx, path, mutate, warn) {
+  const attempt = async () => {
+    const fs = typeof ctx?.get === 'function' ? ctx.get('fs') : undefined
+    if (typeof fs?.resolve !== 'function' || typeof fs?.writeText !== 'function') return
+    const target = await fs.resolve(path)
+    const current = await readToolsCache(ctx, path)
+    if (current.version === undefined && typeof fs.stat === 'function') {
+      // 缓存文件还不存在（或 stat 不可用）→ 交给 createIfAbsent；已存在时它抛 FS_NOT_OBSERVED。
+      const presets = current.presets
+      mutate(presets)
+      const body = JSON.stringify({ version: TOOLS_CACHE_VERSION, presets }, null, 2) + '\n'
+      try {
+        await fs.writeText(target, body, { kind: 'createIfAbsent' })
+        return 'created'
+      } catch {
+        // 并发方刚创建了它 → 重读拿版本，再走一次带版本的替换。
+        const retry = await readToolsCache(ctx, path)
+        const nextPresets = retry.presets
+        mutate(nextPresets)
+        const nextBody = JSON.stringify({ version: TOOLS_CACHE_VERSION, presets: nextPresets }, null, 2) + '\n'
+        if (retry.version === undefined) throw new Error('cache exists but fs.stat() gave no version token')
+        await fs.writeText(target, nextBody, { kind: 'replaceIfVersion', version: retry.version })
+        return 'replaced'
+      }
+    }
+    const presets = current.presets
+    mutate(presets)
+    const body = JSON.stringify({ version: TOOLS_CACHE_VERSION, presets }, null, 2) + '\n'
+    if (current.version === undefined) {
+      // stat 不可用（老宿主）：不带意图做无条件覆盖 —— 宁可这次覆盖，也不要写入失败。
+      await fs.writeText(target, body)
+      return 'overwrote'
+    }
+    await fs.writeText(target, body, { kind: 'replaceIfVersion', version: current.version })
+    return 'replaced'
+  }
+  try {
+    await attempt()
+  } catch (error) {
+    warn('preset tool cache write failed (best-effort, the roster is unaffected): ' + (error instanceof Error ? error.message : String(error)))
+  }
+}
+
+/**
  * 从**活注册表**实时派生每个已安装模式的工具清单与技能清单。
  *
  * 每个模式通过 `agentPresets.acquireScope(id)` 拿到该 preset 的 ScopeKey，
  * 再用 `tools.view(key).visible.keys()` 取「已应用 restriction 的可见工具名」
- * （不用 definitions()/schemas()：前者多一次数组分配，后者深拷贝）。
+ * （不用 definitions()/schemas()：前者多一次数组分配，后者深拷贝）；
  * 技能用 `skills.list({ cwd, scope: key })`。
+ *
+ * 1.1.0 起工具有三个来源（`source` 字段），行上的 `tools` 就是模型实际能直接调用的那批：
+ *   · `executor`  —— ptc 执行器：固定 `['run_code']`，不实测、不缓存；
+ *   · `captured`  —— 实测值（本次派出子代理读请求头，或缓存里的最近实测）；
+ *   · `registered` —— 注册面回退（实测失败），渲染时标 `~reg`。
  *
  * @param ctx - 插件上下文。
  * @param selfId - 本模式自己的 preset id（名册不列自己）。
+ * @param options - `{ capture, parent, cachePath, config }`：`capture` 允许当场派子代理实测
+ *   （只有 `list: true` 传 true）；`parent` 是探针子会话的父 agent（取不到时跳过实测，
+ *   走注册面回退）；`cachePath` / `config` 决定缓存文件位置。
  * @returns 行数组；接口缺失（老宿主）时返回 null（调用方改报 live roster unavailable）。
  *   单模式失败**不拖垮整体**：该行回填 `live:false` 与错误原因。
  */
-async function collectLive(ctx, selfId) {
+async function collectLive(ctx, selfId, options = {}) {
+  const capture = options.capture === true
+  // 探针的 parent 必须用**调用方 agent**（`ctx.get('agent')` 在 `list: true` 的调用栈里
+  // 是取不到的，实测 2026-11-25）—— 取不到时不派探针，直接走注册面回退。
+  const parent = options.parent ?? null
   const get = (name) => {
     try {
       return typeof ctx?.get === 'function' ? ctx.get(name) : undefined
@@ -189,6 +446,90 @@ async function collectLive(ctx, selfId) {
     return null
   }
   if (!Array.isArray(rows)) return null
+
+  const warn = warnOnceFactory(ctx)
+  const cachePath = options.cachePath ?? toolsCachePathOf(ctx, options.config)
+  const cacheResult = await readToolsCache(ctx, cachePath)
+  const cache = cacheResult.presets
+  const cachedOf = (id) => {
+    const entry = cache?.[id]
+    return entry !== null && typeof entry === 'object' ? entry : undefined
+  }
+
+  /**
+   * 找一个 preset 已结束、且比缓存新的子会话，回看它的请求头。
+   *
+   * 目的：把「上一次实测/派活」的子会话当成免费样本，避免每次 `list: true` 都新派一个探针。
+   *
+   * @returns `Promise<{ childId, tools } | null>`。
+   */
+  const latestChildCapture = async (presetId, cached) => {
+    const subagents = get('subagents')
+    if (typeof subagents?.listDescendants !== 'function') return null
+    try {
+      const listed = await subagents.listDescendants()
+      if (!Array.isArray(listed)) return null
+      const candidates = listed
+        .filter((row) => row !== null && typeof row === 'object')
+        .filter((row) => (row.agentPreset ?? row.presetId) === presetId)
+        .filter((row) => typeof row.id === 'string' && row.id !== '')
+        .filter((row) => row.mode !== 'running' && row.activity !== 'running')
+        .sort((a, b) => (Number(b.createdAt) || 0) - (Number(a.createdAt) || 0))
+      for (const row of candidates) {
+        const createdAt = Number(row.createdAt)
+        if (Number.isFinite(createdAt) && createdAt > 0 && Number(cached?.capturedAt) >= createdAt) continue
+        const real = await readRealTools(ctx, row.id)
+        if (real !== null && real.length > 0) return { childId: row.id, tools: real }
+      }
+      return null
+    } catch {
+      return null
+    }
+  }
+
+  /**
+   * 当场实测：派一个极短子代理、**等它跑完**，再读它的请求头。
+   *
+   * @returns `Promise<{ childId, tools } | null>`。
+   */
+  const liveCapture = async (presetId, parent) => {
+    const subagents = get('subagents')
+    if (typeof subagents?.startActivation !== 'function') return null
+    try {
+      const request = {
+        prompt: [{ type: 'text', text: PROBE_PROMPT }],
+        parent,
+        agentPreset: presetId,
+      }
+      try {
+        const maxDepth = subagents.resolveMaxDepth?.()
+        if (Number.isInteger(maxDepth) && maxDepth >= 0) request.maxDepth = maxDepth
+      } catch {
+        // 解析不了就不带，让服务用默认值。
+      }
+      const activation = await subagents.startActivation({
+        provider: 'spawn',
+        label: `probe ${presetId} tools`,
+        request,
+        ...request,
+        delivery: 'parent',
+      })
+      const childId = typeof activation?.childId === 'string' && activation.childId !== '' ? activation.childId : null
+      if (childId === null) return null
+      // 必须等它跑完：请求头只在子会话真的发出过一次请求之后才存在。
+      try {
+        await activation.result
+      } catch {
+        // 子会话失败也让下面的读取试一次：失败前可能已经记下请求头。
+      }
+      const real = await readRealTools(ctx, childId)
+      if (real === null || real.length === 0) return null
+      return { childId, tools: real }
+    } catch (error) {
+      warn(`capturing the real tool table of "${presetId}" failed: ${error instanceof Error ? error.message : String(error)}`)
+      return null
+    }
+  }
 
   const out = []
   for (const row of rows) {
@@ -221,7 +562,45 @@ async function collectLive(ctx, selfId) {
       } catch {
         // 技能枚举失败不影响工具名册。
       }
-      out.push({ id: row.id, tools: names, skills: skillNames, live: true })
+
+      // ── 工具面三级取数 ────────────────────────────────────────────────
+      const cached = cachedOf(row.id)
+      let presetPlugins = null
+      try {
+        presetPlugins = await presets.plugins?.(row.id)
+      } catch {
+        presetPlugins = null
+      }
+      let toolNames
+      let source
+      if (isPtcexecutor(presetPlugins) || row.id === 'ptc') {
+        // ① 执行器：注册面是整套被代理的工具，下发面只有 run_code。不实测、不缓存。
+        toolNames = [PTC_TOOL]
+        source = 'executor'
+      } else if (Array.isArray(cached?.tools) && cached.tools.length > 0) {
+        // ② 缓存命中。
+        toolNames = cached.tools.map((entry) => String(entry))
+        source = 'captured'
+      } else {
+        toolNames = []
+        source = 'registered'
+        if (capture) {
+          // ③ 缓存未命中：先回看已结束的子会话（免费），再当场实测（派探针、等它跑完）。
+          const found = (await latestChildCapture(row.id, cached)) ?? (parent === null ? null : await liveCapture(row.id, parent))
+          if (found !== null) {
+            toolNames = found.tools
+            source = 'captured'
+            await writeToolsCache(ctx, cachePath, (presetsOut) => {
+              presetsOut[row.id] = { tools: found.tools, capturedAt: Date.now(), childId: found.childId }
+            }, warn)
+          }
+        }
+      }
+      if (toolNames.length === 0) {
+        toolNames = names
+        if (source !== 'executor') source = 'registered'
+      }
+      out.push({ id: row.id, tools: toolNames, skills: skillNames, live: true, source })
     } catch (error) {
       out.push({
         id: row.id,
@@ -383,6 +762,20 @@ function renderSkillTable(numbering) {
 }
 
 /**
+ * ptc 行的说明文案（1.1.0 新增，2026-11-25 定稿）。
+ *
+ * ⚠️ 编号**不在这里**：`run_code` 与其他工具一样按首现发号，说明行里的编号从
+ * `numbering` 取。改文案时必须避开 verify.ps1 的 persona 禁词（见该脚本末尾的断言表）。
+ */
+const PTC_EXPLANATION = [
+  'Programmatic Tool Calling. Use it for bulk or repetitive work that',
+  'would flood your context: you write a TypeScript program that calls tools via a',
+  'generated SDK, so loops and batching run inside the program and only the final',
+  'return value reaches you — intermediate results never enter the context window.',
+  'Only run_code is directly callable.',
+]
+
+/**
  * 渲染名册（2026-11-24：完全 live 派生，不再读任何静态文件）。
  *
  * 输出形状：
@@ -399,10 +792,13 @@ function renderSkillTable(numbering) {
  *   · 编号按 rows 顺序（registry 顺序）× 每个模式自己的工具顺序首现分配，绝不截断。
  *   · 每模式只用编号区间表达：不写 `(N tools)`、不写 suitable / notSuitable。
  *   · 取不到的模式行写 `— [unknown]`。
+ *   · `source === 'registered'`（实测失败、退回注册面）的行在编号后标 ` ~reg`：
+ *     那些编号是「注册了」而不是「模型真能直接调」，不许伪装成实测值。
+ *   · ptc 这类挂了执行器的行，另出一段说明（编号取 `numbering`，不硬编码）。
  *   · 技能只在 live 行里聚合；`only in …` 只列「不是所有 live 模式都有」的技能。
  *   · **不设字节上限**（`ROSTER_HARD_CAP_BYTES` 已整体移除，别加回来）。
  *
- * @param rows - `[{ id, tools, skills?, live }]`，顺序即 registry 顺序。
+ * @param rows - `[{ id, tools, skills?, live, source? }]`，顺序即 registry 顺序。
  * @returns `{ text, degraded }`。
  */
 function renderRows(rows) {
@@ -454,7 +850,16 @@ function renderRows(rows) {
       ? row.skills.map((name) => skillNumber.get(String(name))).filter((n) => typeof n === 'number')
       : []
     const skillPart = skillNums.length > 0 ? ` | ${compressSkillRuns(skillNums)}` : ''
-    lines.push(`- ${row.id}: ${compressRuns(nums)}${skillPart}`)
+    const regPart = row.source === 'registered' ? ' ~reg' : ''
+    lines.push(`- ${row.id}: ${compressRuns(nums)}${skillPart}${regPart}`)
+    // 执行器模式（ptc）的说明紧跟在该行下面；编号由上面的首现发号产生，此处只取不造。
+    if (row.source === 'executor') {
+      const n = numbering.get(PTC_TOOL)
+      if (typeof n === 'number') {
+        lines.push(`- ${row.id}: [${num3(n)}] — ${PTC_EXPLANATION[0]}`)
+        for (const extra of PTC_EXPLANATION.slice(1)) lines.push(`  ${extra}`)
+      }
+    }
   }
 
   return { text: lines.join('\n'), degraded }
@@ -502,13 +907,16 @@ function applyMaxDepth(request, subagents) {
  * 装载本模块。
  *
  * @param ctx - preset scope 的插件上下文。
- * @param config - `{ enabled, selfPresetId, disabledPresets }`。
+ * @param config - `{ enabled, selfPresetId, disabledPresets, toolsCachePath }`。
  * @returns void。
  */
 export function apply(ctx, config) {
   if (config?.enabled === false) return
 
   const warn = warnOnceFactory(ctx)
+  // 工具面缓存的绝对路径：优先 `config.toolsCachePath`，否则按本次进程的 DSH_HOME 推导。
+  // 见 toolsCachePathOf()：**不写 `~`**（homedir() 与 DSH_HOME 无关，隔离实例会踩生产 profile）。
+  const cachePath = toolsCachePathOf(ctx, config)
   // ⚠️ 2026-11-07 修（R10，#5）：只判空串不 trim，配置写成 ' blackpigmodel ' 时 selfId 与
   // 名册里的 id 不相等 —— 名册把自己列出来、knownIds 不排除自己、presetUnusable 的
   // self-preset 闸也失效。guard-v10 的 normalizePresetId() 是 trim 后判空的，
@@ -562,6 +970,27 @@ export function apply(ctx, config) {
   }
 
   /** 统一失败回执：`stop:true` 表示别重试，`nextAction` 给可恢复的替代路径。 */
+
+  /**
+   * 把「这个 preset 跑在哪个子会话里」记进工具面缓存。
+   *
+   * 只写 `childId`（+ 时间），**不覆盖已有的 `tools`**：下次 `list: true` 可以回看该子会话，
+   * 它若已结束且比缓存新就顺手刷新工具表，省掉再派一个探针。写缓存失败只 warn，不影响派活回执。
+   *
+   * @param presetId - 派活目标 preset。
+   * @param childId - 子会话 id。
+   * @returns `Promise<void>`。
+   */
+  const recordChildCapture = async (presetId, childId) => {
+    await writeToolsCache(ctx, cachePath, (presets) => {
+      const previous = presets[presetId] !== null && typeof presets[presetId] === 'object' ? presets[presetId] : {}
+      presets[presetId] = {
+        tools: Array.isArray(previous.tools) ? previous.tools : [],
+        capturedAt: typeof previous.capturedAt === 'number' ? previous.capturedAt : 0,
+        childId,
+      }
+    }, warn)
+  }
 
   const failure = (reason, message, options = {}) => ({
     ok: false,
@@ -850,6 +1279,9 @@ export function apply(ctx, config) {
       if (childSessionId === null) {
         return failure('no-child-id', `Dispatching to "${presetId}" returned no subagent id.`, { stop: false, presetId })
       }
+      // 1.1.0：把这个 preset 的子会话 id 记进工具面缓存（只记 childId，不覆盖已有 tools）。
+      // 下一次 `list: true` 就能回看该子会话拿实测工具表，不必再派探针。写失败只 warn。
+      await recordChildCapture(presetId, childSessionId)
       return {
         ok: true,
         presetId,
@@ -1039,7 +1471,8 @@ export function apply(ctx, config) {
       isConcurrencySafe: () => true,
       async execute(args, exec) {
         if (args?.list === true) {
-          const live = await collectLive(ctx, selfId)
+          // 1.1.0：`list: true` 允许当场实测（派探针、**等它跑完**再读请求头），不设超时。
+          const live = await collectLive(ctx, selfId, { capture: true, parent: exec?.agent ?? null, cachePath, config })
           if (live === null) {
             return {
               ok: true,
