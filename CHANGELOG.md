@@ -1,5 +1,24 @@
 # Changelog — dsh-blackpig-mode
 
+## 1.1.0（2026-11-27）：新增文件写冲突守卫 blackpig-file-guard
+
+> **版本号仍是 1.1.0**，未建新 tag。本轮带源码修复（新增守卫模块），因此按「删 Release → 删 tag → `gh release create v1.1.0 --target <新 sha>`」让 tag 指向带本模块的提交；`package.json` 的 `version` 未动，`files[]` 增加一项 `blackpig-file-guard.mjs`。
+
+**新增文件写冲突守卫 `blackpig-file-guard`：并行 worker 写同一文件时，后写者被拒并被告知持有者，占用随 agent 结束自动释放。**
+
+- **挂载**：`cordis.patch.yml:421`（`- id: blackpig-file-guard` / `config: {enabled: true, ttlMs: 600000}`）；挂 `fs/write-intent` 与 `fs/edit-intent` 两条 waterfall（`{prepend: true}`），一次覆盖 write / edit / apply_patch 三条落盘路径。
+- **拒绝码 `FS_CLAIMED_BY_PEER`**，文案四要素：哪个文件（`displayPath`）、持有者（label 或**完整** `childSessionId`）、已持有秒数、可执行的下一步（`send_to_subagent` 交给同一个 worker，或等它结束后重试）。
+- **释放三路**：`agent/disposed`（会话结束即释放，主路径）、`agents.get()` 判活（取不到 ≠ 已死，三态处理）、TTL 兜底（默认 600000 ms，可用环境变量 `DSH_BLACKPIG_FILE_CLAIM_TTL_MS` 覆盖）。
+- **失败取向**：守卫自身任何异常一律放行 + `logger.warn`，绝不当单点故障；放行时 `return await next()` 交回下游原值，不合成任何 intent（不改变宿主「无条件覆盖」语义）。
+
+**已知限制（三条）**：
+
+1. **shell 写入不拦**：`pwsh` / `bash` / `run_code` 写文件绕过 `ctx.fs`，守卫拦不到（宿主原生策略同一条边界）。
+2. **`fs-observation-policy` 启用后失效**：它占同一 waterfall 且先截断则守卫完全失效；`--dump-config` 里该行 `disabled` 不再是 `true` 就要重测本守卫。
+3. **仅同进程内生效**：占用表在 `globalThis[Symbol.for('dsh-blackpig-mode:file-claims:v1')]`，不落盘、不跨进程，两个 DSH 实例之间不共享。
+
+**验证**：`dsh-verify` **PASS + exit 0**（未盖基线）；离线端到端四条判据（c1 后写被拒 / c2 冲突期间先写不丢 / c3 文案带可执行持有者身份 / c4 释放后重试成功）**全中**。真·黑猪 preset 会话在离线 HOME 构造不出（宿主 preset 绑定缺陷），故这四条是机制级端到端，不是桌面实例上的黑猪全链路。
+
 ## 2026-11-26 v1.1.0 **再次原地覆盖**（版本号不变）：探针缺 `signal` = BUG1 真因
 
 > **版本号仍是 1.1.0**，**不建新 tag**。`gh release upload v1.1.0 --clobber` 覆盖同一资产，

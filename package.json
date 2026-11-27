@@ -9,6 +9,7 @@
   },
   "files": [
     "cordis.patch.yml",
+    "blackpig-file-guard.mjs",
     "file-info.mjs",
     "section-mute.mjs",
     "blackpig-roster.mjs",

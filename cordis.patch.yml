@@ -402,3 +402,24 @@
           config:
             enabled: true
             interruptBeforeSend: true
+        # ── ★ 文件写冲突守卫（同一文件只许一个 worker 写）──
+        #
+        # 挂 `fs/write-intent` / `fs/edit-intent` 两条 waterfall（`{ prepend: true }`），
+        # write / edit / apply_patch 三条落盘路径都在真正写之前经过这里。
+        # 第二个 worker 写同一个文件时抛 `FS_CLAIMED_BY_PEER`，错误文本带
+        # 「文件 + 持有者（label 或完整 childSessionId）+ 已持有秒数 + 交给谁重试」。
+        #
+        # 为什么排在链首（prepend）：拦截必须在任何下游监听者之前发生 ——
+        # `dsh-workspace-changes` 的 `fs/write-intent` 监听器在 `await next()` 之后
+        # 会 `capture()` 并读文件内容；我们要在它跑之前就截断。放行时本模块
+        # **原样** `return await next()`，不合成任何 intent（`undefined` 在宿主语义里
+        # 就是「无条件覆盖」，合成 createIfAbsent 等于给每次写入凭空加一层 CAS）。
+        #
+        # ttlMs：占用兜底回收时间。默认 600000（10 分钟），可用环境变量
+        # `DSH_BLACKPIG_FILE_CLAIM_TTL_MS` 覆盖（验证时需要调短）。
+        # 正常回收走 `agent/disposed`（会话结束即释放），TTL 只是最后一道。
+        - id: blackpig-file-guard
+          name: "dsh-blackpig-mode/blackpig-file-guard.mjs"
+          config:
+            enabled: true
+            ttlMs: 600000

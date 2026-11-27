@@ -311,6 +311,34 @@ Skill index (12):
 
 ---
 
+## 文件写冲突守卫（1.1.0 新增）
+
+**解决什么问题**：黑猪把活拆给多个 worker 并行跑。两个工人被派到**同一个文件**时，宿主的默认行为是「后写者无条件覆盖」——先写的那份**静默消失**，而两边都回报成功。大脑拿到两份「已完成」，磁盘上只剩一份，这种损坏在日常汇报里看不出来。
+
+**怎么工作**：新模块 `blackpig-file-guard.mjs` 在 `cordis.patch.yml` 里以 `blackpig-file-guard` 挂上 `fs/write-intent` / `fs/edit-intent` 两条 waterfall（`{prepend: true}`，排在链首做判定），write / edit / apply_patch 三条落盘路径都在**真正写之前**经过它：
+
+| 情况 | 行为 |
+| --- | --- |
+| 文件无主 | 登记「谁在写」并放行（占用表在 `globalThis[Symbol.for('dsh-blackpig-mode:file-claims:v1')]`，进程内、不落盘） |
+| 自己就是持有者 | 刷新持有时间后放行（同一个 worker 反复改同一文件不受影响，不会自锁） |
+| 被别的 worker 持有 | 拒绝写入，抛 `FsError`，错误码 **`FS_CLAIMED_BY_PEER`** |
+
+拒绝文案四要素缺一不可：哪个文件（`displayPath`）、持有者（label，或**完整** `childSessionId`，可直接粘进 `send_to_subagent`）、已持有秒数、下一步（交给同一个 worker，或等它结束后重试）。
+
+**占用怎么释放**：① `agent/disposed` —— 会话结束立刻释放（主路径）；② `agents.get()` 判活 —— 持有者已不在就清（取不到服务 ≠ 已死，三态处理，不会误清）；③ TTL 兜底 —— 默认 10 分钟，环境变量 **`DSH_BLACKPIG_FILE_CLAIM_TTL_MS`**（毫秒）可覆盖，验证时用它调短。
+
+**守卫自己出错时一律放行**：取 sessionId 失败、服务形状不符、表被外部改坏等内部异常，都只 `logger.warn` 一行并照常 `await next()`。它是保险，不是单点故障——代价只能是「这一次没拦住」，绝不会变成「这一次谁都不许写」。放行时**原样** `return await next()`，不合成任何 intent，不改变宿主「无条件覆盖」的语义（不会给普通写入凭空加一层 CAS）。
+
+**已知限制（三条）**：
+
+1. **shell 写入不拦**：`pwsh` / `bash` / `run_code` 写文件绕过 `ctx.fs`，守卫管不到；宿主原生策略同样管不到 shell，这是同一条边界，不是本守卫引入的。
+2. **`fs-observation-policy` 启用后失效**：它占同一条 waterfall，先截断则守卫完全失效。判据：`--dump-config` 里该行 `disabled` 不再是 `true` 就要重测本守卫。
+3. **仅同进程内生效**：占用表只在当前进程的 `globalThis` 上，不落盘、不跨进程；两个 DSH 实例之间不共享，进程重启即清空。
+
+**验证状态**：`dsh-verify` **PASS + exit 0**（未盖基线）；**离线端到端四条判据全部通过** —— c1 第二个工人的写被拒、c2 冲突期间先写的内容不丢、c3 文案带可执行的持有者身份、c4 持有者释放后重试成功（终值为后写者内容，即「后写者赢」只发生在授权之后）。⚠️ 真·黑猪 preset 会话在离线 HOME 里构造不出（宿主 preset 绑定缺陷），所以这四条是**机制级**端到端，不是桌面实例上的黑猪全链路。
+
+---
+
 ## 这是给谁用的
 
 写清前提，缺一条就别装：
