@@ -123,10 +123,10 @@ function Find-PresetDeclaration {
 $expected = [ordered]@{
     'cordis.patch.yml'    = 0   # 不参与严格字节校验（人格随编辑变化；5/5 用段数+needle 断言）
     'guard-v10.mjs'       = 210793   # 2026-11-27：批四改动后实测（原 2026-11-24 值 192713）
-    'blackpig-roster.mjs' = 93923   # 2026-11-27：批四实测（原 2026-11-26 值 72198）
+    'blackpig-roster.mjs' = 94012   # 2026-11-27：派活描述补「OUT 写明证据形式」后实测（原 93923）
     'blackpig-file-guard.mjs' = 21028   # 2026-11-27：写冲突守卫
     'blackpig-watchdog.mjs'   = 40364   # 2026-11-27 新增：父侧卡死看门狗（四证判活，唤而不杀）
-    'subtalk.mjs'         = 59424   # 2026-11-27：批四实测（原 2026-11-24 值 57920）
+    'subtalk.mjs'         = 59511   # 2026-11-27：同上（原 59424）
     'file-info.mjs'       = 39726   # 2026-11-24：描述保守精简（list:true/8192B 保留）
     'section-mute.mjs'    = 2537    # 2026-11-24 新增：空文本段遮蔽 harness:source / app:web-surface
     'compat.mjs'          = 57537   # 2026-11-24：applyToTools 的 agent 描述压缩

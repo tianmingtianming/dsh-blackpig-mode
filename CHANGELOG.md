@@ -20,6 +20,9 @@
 
 **3. brief 三段格式校验**：`subagent_preset` / `send_to_subagent` 的 brief 缺 `TASK` / `INPUT` / `OUT` 任一 → 拒 **`brief-not-structured`**。
 
+- 2026-11-27 追加（不改校验逻辑，只改描述文案）：派活工具描述（`subagent_preset` 工具 description 讲 `OUT` 那段、`send_to_subagent` description）**要求 OUT 写明证据形式**（`path:line` / 字节数 / 计数）。依据 **228 个工人实测**：brief 里给了标签骨架时 **71.4%** 照做、L4 从 **10.4% 降到 0.9%**；`OUT` 没要求证据形式时，报告大量只靠零散数字擦边。
+- 2026-11-27 追加（人格收敛，避免两处重复收费）：人格里 `**Every brief stands alone.** …` 那句由 **132 → 95 字符**（人格总数 **7,285 → 7,248** 字符，段数仍 **10**）：证据形式的细节已由 `subagent_preset` / `send_to_subagent` 的参数说明承担，人格不再重复要求。
+
 **4. 必填 `task` 标签 + 派发去重**：同一调用方下同一 `task` 已有存活 worker → 拒 **`duplicate-task`**（文案给 `send_to_subagent` 的完整 `childSessionId`）；`reuseId` 复用不判重。
 
 **5. `reuseId` 模式一致性**：复用的 worker 模式与传入 `preset` 不符 → 拒 **`reuse-mode-mismatch`**。
