@@ -1,5 +1,52 @@
 # Changelog — dsh-blackpig-mode
 
+## 1.1.0（2026-11-27）：六条硬机制与人格压缩
+
+> **版本号仍是 1.1.0**，不新建版本号（仓库惯例：同版本多节，按日期追加）。本节记本版六条机制与人格压缩；文件守卫的挂载细节见下一节。
+
+**一句话**：把「并行派活」从口头约定变成六道机器闸门 —— 冲突可见、卡死可唤、brief 可验、重复可拦、模式可对、失败必改派。文件 / 派发类闸门都在**真正发生之前**判定，拦下时只回执、不落盘、不中断正在跑的工人；看门狗只在事中观察，只唤醒、不杀。
+
+**1. 文件写冲突守卫（`blackpig-file-guard.mjs`）**
+
+- 挂 `fs/write-intent` / `fs/edit-intent`（`{prepend: true}`），write / edit / apply_patch 三条落盘路径都在**真正写之前**判定。
+- 同一文件已被另一个在跑的 worker 占用时，后写者被拒，错误码 **`FS_CLAIMED_BY_PEER`**；文案含**文件路径**、持有者**完整 `childSessionId`**、**已持有秒数**、**两条出路**（`send_to_subagent` 把活交给同一 worker / 等它结束后重试）。
+- 占用随 `agent/disposed`（worker 结束）、判死、TTL（默认 **600 s**，env **`DSH_BLACKPIG_FILE_CLAIM_TTL_MS`**）自动释放，无需人工清理；同一 worker 反复写自己占的文件放行。
+
+**2. 父侧看门狗（`blackpig-watchdog.mjs`）**
+
+- 四证判活：模型正在生成（`agent/assistant-stream` 未 end）/ 工具在飞（`pre-execute` 已发未回）/ 后台 job 在跑（`jobs.list`）/ 等审批；**任一为真只刷新计时，绝不计时**。
+- 四证全空且静默超阈值（默认 **600 s**，env **`DSH_BLACKPIG_WATCHDOG_SILENCE_MS`**）→ 给协调者发一条 `[WATCHDOG-STALLED]` 通知把它唤醒，**绝不 interrupt 工人**；同一段静默期最多 2 条通知，任何活动恢复即复位。
+- 证据源取不到 → 该工人永久跳过监控，绝不退化成「按时间判死」。
+
+**3. brief 三段格式校验**：`subagent_preset` / `send_to_subagent` 的 brief 缺 `TASK` / `INPUT` / `OUT` 任一 → 拒 **`brief-not-structured`**。
+
+**4. 必填 `task` 标签 + 派发去重**：同一调用方下同一 `task` 已有存活 worker → 拒 **`duplicate-task`**（文案给 `send_to_subagent` 的完整 `childSessionId`）；`reuseId` 复用不判重。
+
+**5. `reuseId` 模式一致性**：复用的 worker 模式与传入 `preset` 不符 → 拒 **`reuse-mode-mismatch`**。
+
+**6. 失败必改派闸**：协调者某次工具失败后，下一次派活的 brief 必须提到该错误（错误码 / 工具名，或错误原文前 20 字），否则拒 **`failure-not-delegated`**；立刻重试同一工具视为已处理。豁免：`ask_user_question`、派活工具自身失败、黑猪策略拒绝、`ABORTED` 系。
+
+**7. 人格压缩**：`persona.prefix` **8,105 → 7,285 字符**（按字符/4 粗估约 **2,026 → 1,821 token**；实测日期 2026-11-27）。删掉已被代码接管的文字，新增「一条 brief = 一个产物」判据。
+
+**已知限制（七条，不许粉饰）**
+
+| # | 限制 | 后果 / 判据 |
+| --- | --- | --- |
+| 1 | **shell 写不拦** | 工人用 `pwsh` / `bash` / `run_code` 写文件绕过 `ctx.fs`，文件守卫看不见 |
+| 2 | **`delete-intent` 未挂** | 先删后重建可绕过占用检查 |
+| 3 | **`fs-observation-policy` 一旦启用会截断链** | 守卫完全失效；判据：`--dump-config` 里该插件那行 `disabled` 不再为 `true` |
+| 4 | **工具内部死锁看门狗判不出来** | 永远表现为「工具在飞」，按安全边永不触发 |
+| 5 | **brief 校验只验格式** | 验不了「brief 是否自足、产物是否可验收」——那部分靠人格判据 |
+| 6 | **去重依赖标签纪律** | 同一件事换了 `task` 写法就拦不住 |
+| 7 | **同一微任务内两 worker 同时起步的竞态** | 代码推断不会双双读到无主，**未实测** |
+
+**验证（分级）**
+
+- 单元测试：批二 **15/15**、看门狗 **6/6**（含变异测试）、批三 **10/10**。
+- 装载层：`dsh-verify` **PASS + exit 0**（临时 HOME 装载）。
+- 文件守卫：**离线黑猪会话端到端四条已通过** —— 后写者被拒 / 文件未被覆盖 / 文案含持有者 id / 前者结束后重试成功。
+- 其余五条：截至本次发布，**机制层与装载层已验证；真实黑猪会话端到端未在本文档成稿时确认**（见 README「验证状态」表）。
+
 ## 1.1.0（2026-11-27）：新增文件写冲突守卫 blackpig-file-guard
 
 > **版本号仍是 1.1.0**，未建新 tag。本轮带源码修复（新增守卫模块），因此按「删 Release → 删 tag → `gh release create v1.1.0 --target <新 sha>`」让 tag 指向带本模块的提交；`package.json` 的 `version` 未动，`files[]` 增加一项 `blackpig-file-guard.mjs`。
@@ -11,13 +58,13 @@
 - **释放三路**：`agent/disposed`（会话结束即释放，主路径）、`agents.get()` 判活（取不到 ≠ 已死，三态处理）、TTL 兜底（默认 600000 ms，可用环境变量 `DSH_BLACKPIG_FILE_CLAIM_TTL_MS` 覆盖）。
 - **失败取向**：守卫自身任何异常一律放行 + `logger.warn`，绝不当单点故障；放行时 `return await next()` 交回下游原值，不合成任何 intent（不改变宿主「无条件覆盖」语义）。
 
-**已知限制（三条）**：
+**文件守卫自身的三个边界**（本版机制的完整七条见上一节）：
 
 1. **shell 写入不拦**：`pwsh` / `bash` / `run_code` 写文件绕过 `ctx.fs`，守卫拦不到（宿主原生策略同一条边界）。
 2. **`fs-observation-policy` 启用后失效**：它占同一 waterfall 且先截断则守卫完全失效；`--dump-config` 里该行 `disabled` 不再是 `true` 就要重测本守卫。
 3. **仅同进程内生效**：占用表在 `globalThis[Symbol.for('dsh-blackpig-mode:file-claims:v1')]`，不落盘、不跨进程，两个 DSH 实例之间不共享。
 
-**验证**：`dsh-verify` **PASS + exit 0**（未盖基线）；离线端到端四条判据（c1 后写被拒 / c2 冲突期间先写不丢 / c3 文案带可执行持有者身份 / c4 释放后重试成功）**全中**。真·黑猪 preset 会话在离线 HOME 构造不出（宿主 preset 绑定缺陷），故这四条是机制级端到端，不是桌面实例上的黑猪全链路。
+**验证**：`dsh-verify` **PASS + exit 0**（未盖基线）；离线端到端四条判据（c1 后写被拒 / c2 冲突期间先写不丢 / c3 文案带可执行持有者身份 / c4 释放后重试成功）**全中**。此后在同一版本上又补做了**离线黑猪会话**端到端，四条同样全过（后写者被拒 / 文件未被覆盖 / 文案含持有者 id / 前者结束后重试成功）：**原先「离线 HOME 构造不出黑猪 preset 会话」的结论已被这次补测推翻，以补测为准。**
 
 ## 2026-11-26 v1.1.0 **再次原地覆盖**（版本号不变）：探针缺 `signal` = BUG1 真因
 

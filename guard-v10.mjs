@@ -1525,6 +1525,368 @@ function ownerPresetId(ctx, agent, warn) {
   return normalizePresetId(agent?.session?.header?.agentPreset)
 }
 
+// ══════════════════════════════════════════════════════════════════════════════
+// 批三（2026-11-27）：failedSteps —— 「失败必改派」闸
+//
+// 要解决的问题：大脑把一个步骤做失败了（工具报错），下一句却换个话题继续派活，
+// 失败证据就此蒸发，用户只看到「已完成」。机制化：
+//   · 记录 —— `tools/post-execute` 里把**协调者会话**的失败工具调用记进一本进程内账本；
+//   · 闸门 —— `tools/pre-execute` 里在派活入口（`subagent_preset` / `send_to_subagent`）
+//     校验这次 brief 是否带上了那段失败：带上了 → 视为已处理，清除并放行；
+//     没带上 → 拒绝（code `failure-not-delegated`），并给出两条可执行修法。
+//
+// 存储：`globalThis[Symbol.for('dsh-blackpig-mode:failed-steps:v1')]`
+//   = Map<sessionId, Array<{ tool, code, snippet, at }>>
+//   · 每会话最多 `FAILED_STEPS_MAX` 条（先进先出）
+//   · TTL 默认 30 分钟（env `DSH_BLACKPIG_FAILEDSTEP_TTL_MS` 覆盖，每次现读）
+//   · 存 globalThis 而不是模块级 Map：同一进程里每个 preset scope 会各自 apply 一次，
+//     「这个会话有哪些未处理的失败」是全局事实，不该被 apply 作用域切成几份互相看不见的副本。
+//     （与 blackpig-file-guard.mjs 的 `file-claims` 同一条理由。）
+//
+// 只记**协调者会话**：子代理 / 队友失败是它们自己的事（它们有完整工具面自己去修），
+// 记到大脑账上等于让大脑替它们背锅，还会在它们自己派活时误拦。判据不写死 preset 名，
+// 与守卫同源：preset 活绑定（`ownerPresetId`）命中本 preset，且不是被委派出去的子会话。
+//
+// 豁免（不记，理由逐条）：
+//   · `ask_user_question` —— 用户没答 / 取消了不是「动作失败」；把它当失败会让
+//     「问用户」变成需要先派活的错误，机制自相矛盾。
+//   · `subagent_preset` / `send_to_subagent` —— 它们的失败**由它们自己的拒绝文案**处理
+//     （本闸的拒绝、brief 三段校验、派发去重都走那条）。再记一笔会让闸门拦闸门，
+//     形成「派不出去 → 记失败 → 更派不出去」的自我循环。
+//   · 本守卫自己的策略拒绝（`blackpig mode: …` 开头的错误，见 `failureFrom`）——
+//     那是「工具不在你的面上」，不是「这一步做失败了」。记下来会立刻把下一次派活堵死
+//     （被拒 read → 记失败 → 派活被本闸拒 → 被拒 read …），而且它由本模块自己产生，
+//     属于自指。真正的失败（工具体抛错 / 权限 / 路径不存在）不带这个前缀，不会被漏记。
+//   · 用户中止（宿主写死的 `ABORTED` / `ABORTED_BEFORE_DISPATCH`）—— 用户点了停止
+//     不是「大脑这一步做失败了」。把它记账会堵住「用户停止后再说继续」这条最常见的路，
+//     而且要求大脑把「你取消了」抄进 brief 是纯噪声。
+//
+// 失败安全三条（硬要求）：
+//   ① 任何内部异常 → 放行，只 warn 一行；绝不因为它崩了堵死派活。
+//   ② 取不到 sessionId → 不记录也不拦。
+//   ③ 服务/事件签名不符 → 整个机制静默停用（warn 一次），不留「只记不拦」之类的半残状态。
+// ══════════════════════════════════════════════════════════════════════════════
+
+/** 失败步骤账本在进程内的唯一存储键（同进程内多份实例共享同一本账）。 */
+const FAILED_STEPS_KEY = Symbol.for('dsh-blackpig-mode:failed-steps:v1')
+
+/** 每个会话最多留几条（先进先出）。 */
+const FAILED_STEPS_MAX = 5
+
+/** 默认存活时间：30 分钟。 */
+const FAILED_STEPS_TTL_DEFAULT_MS = 30 * 60 * 1000
+
+/** TTL 覆盖用环境变量（读不到 / 非法时用默认值）。 */
+const FAILED_STEPS_TTL_ENV = 'DSH_BLACKPIG_FAILEDSTEP_TTL_MS'
+
+/** 触发闸门的派活入口：跨模式派活（roster 注册）+ 继续对话（subtalk 注册）。 */
+const DELEGATION_TOOLS = new Set(['subagent_preset', 'send_to_subagent'])
+
+/** 不记失败的三个工具，理由见本段标题注释。 */
+const FAILED_STEPS_EXEMPT = new Set(['ask_user_question', 'subagent_preset', 'send_to_subagent'])
+
+/** 取进程内账本；不是 Map（被别的代码写过 / 旧版本残留）就重建，绝不让畸形值带崩机制。 */
+function failedStepsStore() {
+  const current = globalThis[FAILED_STEPS_KEY]
+  if (current instanceof Map) return current
+  const fresh = new Map()
+  globalThis[FAILED_STEPS_KEY] = fresh
+  return fresh
+}
+
+/** 读 TTL（毫秒）。每次现读 env：测试与现场调参都不必重启进程。 */
+function failedStepsTtlMs() {
+  let raw
+  try {
+    raw = globalThis.process?.env?.[FAILED_STEPS_TTL_ENV]
+  } catch {
+    raw = undefined
+  }
+  if (typeof raw === 'string' && raw.trim() !== '') {
+    const value = Number(raw)
+    if (Number.isFinite(value) && value > 0) return value
+  }
+  return FAILED_STEPS_TTL_DEFAULT_MS
+}
+
+/** 失败文本归一化：折叠空白、去首尾，保证 code / snippet 是单行。 */
+function normalizeFailureText(value) {
+  if (typeof value !== 'string') return ''
+  return value.replace(/\s+/gu, ' ').trim()
+}
+
+/** 丢掉过期条目与空会话（每次读写账本前都跑一遍）。 */
+function pruneFailedSteps(store, now) {
+  const ttl = failedStepsTtlMs()
+  for (const [sessionId, entries] of store) {
+    if (!Array.isArray(entries)) {
+      store.delete(sessionId)
+      continue
+    }
+    const kept = []
+    for (const entry of entries) {
+      if (entry === null || typeof entry !== 'object') continue
+      if (typeof entry.at !== 'number' || !Number.isFinite(entry.at)) continue
+      if (now - entry.at > ttl) continue
+      kept.push(entry)
+    }
+    if (kept.length === 0) store.delete(sessionId)
+    else if (kept.length !== entries.length) store.set(sessionId, kept)
+  }
+}
+
+/** 会话结束 / 被回收时删掉它的失败账本条目（键与守卫的状态表同一组候选键）。 */
+function forgetFailedSteps(sessionIds) {
+  try {
+    const store = failedStepsStore()
+    for (const sessionId of sessionIds ?? []) {
+      if (typeof sessionId === 'string' && sessionId !== '') store.delete(sessionId)
+    }
+  } catch {
+    // 清理失败最多让一条记录多活到 TTL，绝不影响 disposed 事件本身。
+  }
+}
+
+/**
+ * 从归一化结果里读出「这是失败」以及 code / snippet。
+ *
+ * 契约（宿主 `@deepseek-ai/dsh-tools` 的 `contracts.ts`）：
+ *   ToolExecutionFailure = { isError: true, error: { message, info?: { name, code } } }
+ * 所以失败判据以 `isError` 为准；`isError` 缺失（未来宿主换了字段名）但 `error` 在场的
+ * 也算失败。整段兜错：getter 抛错就当作「不是失败」，绝不臆造一条记录。
+ *
+ * @returns `{ code, snippet }`，或 undefined（不是失败 / 读不出来）。
+ */
+function failureFrom(result) {
+  if (result === null || typeof result !== 'object') return undefined
+  let isError
+  let hasError = false
+  let message = ''
+  let code = ''
+  try {
+    isError = result.isError
+    hasError = result.error !== undefined && result.error !== null
+    const error = result.error
+    if (error !== null && typeof error === 'object') {
+      if (typeof error.message === 'string') message = error.message
+      const info = error.info
+      if (info !== null && typeof info === 'object' && typeof info.code === 'string') code = info.code
+    }
+  } catch {
+    return undefined
+  }
+  if (isError !== true && !(isError === undefined && hasError)) return undefined
+  const text = normalizeFailureText(message)
+  const normalizedCode = normalizeFailureText(code)
+  // 自我循环防线：本守卫的策略拒绝不是「步骤失败」，不记账（理由见标题注释）。
+  if (normalizedCode === '' && text.startsWith('blackpig mode:')) return undefined
+  // 用户中止不是「步骤失败」（宿主 canonical 码，见标题注释）。
+  if (normalizedCode === 'ABORTED' || normalizedCode === 'ABORTED_BEFORE_DISPATCH') return undefined
+  return {
+    code: normalizedCode !== '' ? normalizedCode : text.slice(0, 60) || 'unknown-failure',
+    snippet: text.slice(0, 80),
+  }
+}
+
+/** 本次调用能当 brief 用的文本（`subagent_preset` 的 prompt / `send_to_subagent` 的 message）。 */
+function delegationBriefText(exec) {
+  const args = exec?.arguments
+  if (args === null || typeof args !== 'object') return ''
+  const parts = []
+  for (const key of ['prompt', 'message']) {
+    let value
+    try {
+      value = args[key]
+    } catch {
+      value = undefined
+    }
+    if (typeof value === 'string' && value.trim() !== '') parts.push(value)
+  }
+  return parts.join('\n')
+}
+
+/** 这条失败是否已在这次 brief 里被提到（大小写不敏感；code 允许只含前 20 字片段）。 */
+function failureMentionedIn(brief, entry) {
+  const haystack = brief.toLowerCase()
+  const needles = []
+  const code = typeof entry?.code === 'string' ? entry.code : ''
+  const tool = typeof entry?.tool === 'string' ? entry.tool : ''
+  if (code !== '') {
+    needles.push(code)
+    if (code.length > 20) needles.push(code.slice(0, 20))
+  }
+  if (tool !== '') needles.push(tool)
+  for (const needle of needles) {
+    const text = needle.trim().toLowerCase()
+    if (text === '') continue
+    if (haystack.includes(text)) return true
+  }
+  return false
+}
+
+/** 拒绝文案（固定模板；tool / code 截短，保证整句 ≤200 字、模板尾巴不被切掉）。 */
+function failedStepDenialReason(entry) {
+  const tool = typeof entry?.tool === 'string' && entry.tool !== '' ? entry.tool.slice(0, 24) : '上一个工具'
+  const code = typeof entry?.code === 'string' && entry.code !== '' ? entry.code.slice(0, 60) : 'unknown-failure'
+  return (
+    `上一步 \`${tool}\` 失败（\`${code}\`）。` +
+    '要么把这段错误原文写进这次 brief 的 INPUT 并派给能处理它的 worker，' +
+    '要么停下向用户报『未完成 + 证据』。不许换话题继续。'
+  )
+}
+
+/**
+ * 安装失败必改派闸：`tools/post-execute` 记账 + `tools/pre-execute` 校验。
+ *
+ * 两个监听器**一起**注册、一起停用：注册阶段任一失败就把整机制标成 disabled，
+ * 已挂上的那条在 disabled 分支里原样 `next()` —— 不会出现「只记不拦」或「只拦不记」。
+ *
+ * @param options.ctx - 插件上下文。
+ * @param options.sessionIdOf - 从 agent 取 sessionId（与守卫的 `keyOf` 同源）。
+ * @param options.isCoordinator - 该 agent 是不是黑猪大脑。
+ * @param options.warn - 告警器（调用方已带 `blackpig-guard: ` 前缀；同因只报一次）。
+ * @returns `{ isDisabled }`（诊断用）。
+ */
+function installFailedStepsGate(options) {
+  const { ctx, sessionIdOf, isCoordinator, warn } = options
+  let disabled = false
+  const describeError = (error) => (error instanceof Error ? (error.stack ?? error.message) : String(error))
+
+  /** 停用整机制：只 warn 一次，之后两个监听器都原样放行。 */
+  const disable = (why) => {
+    if (disabled) return
+    disabled = true
+    warn(`failed-steps gate DISABLED — the whole mechanism is off (no half-installed state): ${why}`)
+  }
+
+  /** 记一条失败（只给协调者会话；豁免表 / 取不到 sessionId 都直接返回）。 */
+  const record = (exec, result) => {
+    const toolName = exec?.name
+    if (typeof toolName !== 'string' || toolName === '') return
+    if (FAILED_STEPS_EXEMPT.has(toolName)) return
+    const failure = failureFrom(result)
+    if (failure === undefined) return
+    const agent = exec?.agent
+    const sessionId = sessionIdOf(agent)
+    if (sessionId === undefined) return
+    if (!isCoordinator(agent)) return
+    const store = failedStepsStore()
+    const now = Date.now()
+    pruneFailedSteps(store, now)
+    const current = store.get(sessionId)
+    const entries = Array.isArray(current) ? current : []
+    entries.push({ tool: toolName, code: failure.code, snippet: failure.snippet, at: now })
+    while (entries.length > FAILED_STEPS_MAX) entries.shift()
+    store.set(sessionId, entries)
+  }
+
+  /**
+   * 派活入口的校验。
+   * @returns deny 决策（拦）或 undefined（放行）。
+   */
+  const inspect = (exec) => {
+    const toolName = exec?.name
+    if (typeof toolName !== 'string' || !DELEGATION_TOOLS.has(toolName)) return undefined
+    const agent = exec?.agent
+    const sessionId = sessionIdOf(agent)
+    if (sessionId === undefined) return undefined
+    if (!isCoordinator(agent)) return undefined
+    const store = failedStepsStore()
+    const now = Date.now()
+    // 每次校验前先 prune：过期条目不得拦人，空会话不得留在账本里。
+    pruneFailedSteps(store, now)
+    const entries = store.get(sessionId)
+    if (!Array.isArray(entries) || entries.length === 0) return undefined
+
+    const brief = delegationBriefText(exec)
+    const cleared = []
+    let blocker
+    for (const entry of entries) {
+      if (entry === null || typeof entry !== 'object') continue
+      // ② 立刻重试同一个工具 → 视为「这就是那次失败的后续」，清除并放行。
+      //    （派活工具自己的失败不记账，见 FAILED_STEPS_EXEMPT；这条是给账本里
+      //    已有的历史条目兜底的对称规则。）
+      if (typeof entry.tool === 'string' && entry.tool === toolName) {
+        cleared.push(entry)
+        continue
+      }
+      // ① brief 里已经带上这段失败（错误码 / 工具名 / 错误码前 20 字）→ 已处理。
+      if (brief !== '' && failureMentionedIn(brief, entry)) {
+        cleared.push(entry)
+        continue
+      }
+      // 账本按时间正序，最后一个未处理的 = 最近那次失败（拒绝文案点名它）。
+      blocker = entry
+    }
+
+    if (cleared.length > 0) {
+      const left = entries.filter((entry) => !cleared.includes(entry))
+      if (left.length === 0) store.delete(sessionId)
+      else store.set(sessionId, left)
+      // 「任一条已被处理」就放行：本闸一次只要求处理一条，不要求清空账本。
+      return undefined
+    }
+    if (blocker === undefined) return undefined
+    return {
+      kind: 'deny',
+      reason: failedStepDenialReason(blocker),
+      info: { name: 'BlackpigFailedStep', code: 'failure-not-delegated' },
+    }
+  }
+
+  const onPostExecute = async (exec, result, next) => {
+    if (typeof next !== 'function') {
+      disable('tools/post-execute signature mismatch: next() is not a function')
+      return { kind: 'accept' }
+    }
+    if (disabled) return next()
+    // ⚠️ waterfall 契约：**先 next() 再加工**（理由见本文件 `tools/post-execute` 主监听那段注释）。
+    const decision = await next()
+    if (disabled) return decision
+    try {
+      record(exec, result)
+    } catch (error) {
+      // 内部异常一律放行（不得因为记账失败堵死任何调用），但必须响一声。
+      warn(
+        'recording a failed tool call in tools/post-execute threw — the result is passed through unchanged. ' +
+          'Underlying error: ' + describeError(error),
+      )
+    }
+    return decision
+  }
+
+  const onPreExecute = async (exec, next) => {
+    if (typeof next !== 'function') {
+      disable('tools/pre-execute signature mismatch: next() is not a function')
+      return { kind: 'allow' }
+    }
+    if (disabled) return next()
+    try {
+      const decision = inspect(exec)
+      if (decision !== undefined) return decision
+    } catch (error) {
+      // 内部异常一律放行 —— 闸门崩了也绝不堵死派活。
+      warn(
+        'the failed-steps gate in tools/pre-execute threw — this call is ALLOWED. ' +
+          'Underlying error: ' + describeError(error),
+      )
+    }
+    return next()
+  }
+
+  try {
+    if (ctx === null || typeof ctx !== 'object') throw new Error('plugin ctx is not an object')
+    if (typeof ctx.on !== 'function') throw new Error('ctx.on is not a function')
+    ctx.on('tools/post-execute', onPostExecute)
+    ctx.on('tools/pre-execute', onPreExecute)
+  } catch (error) {
+    // 注册阶段失败 = 宿主事件/服务签名变了。停用整机制（已挂上的那条会在 disabled 分支放行），
+    // 绝不半残：宁可这一版没有闸门，也不能出现「只记不拦」的假保护。
+    disable('registering tools/post-execute + tools/pre-execute failed — ' + describeError(error))
+  }
+  return { isDisabled: () => disabled }
+}
+
 /**
  * 装载守卫。
  *
@@ -3158,6 +3520,24 @@ export function apply(ctx, config) {
     { prepend: true },
   )
 
+  // ── 批三：失败必改派闸（failedSteps）──────────────────────────────────────
+  // 两个监听器都在这里统一安装：`tools/post-execute` 记失败、`tools/pre-execute` 拦派活。
+  // 注册失败只让本闸停用（warn 一次），绝不影响上面 restrict() / guard() / 结果裁剪任何一层。
+  //
+  // 归属判据与守卫同源：`ownerPresetId` 的 preset 活绑定命中本 preset，且不是被委派出去的
+  // 子会话。**不写死 preset 名** —— config.presetId 换名后这里自动跟着换。
+  installFailedStepsGate({
+    ctx,
+    sessionIdOf: keyOf,
+    isCoordinator: (agent) => {
+      if (agent === undefined || agent === null) return false
+      // 子代理 / 队友失败不记到大脑账上（它们有完整工具面自己去修）。
+      if (isDelegatedChild(agent)) return false
+      return ownerPresetId(ctx, agent, warn) === presetId
+    },
+    warn,
+  })
+
   // ── 投递层裁剪：**兜底**，不是主路径（2026-11-03 降级）────────────────
   //
   // ⚠️ 宿主文档明文：「Do not listen to `system-prompt/assemble` to add or remove
@@ -3421,6 +3801,8 @@ export function apply(ctx, config) {
       const agent = payload?.agent
       if (agent === undefined || agent === null) return
       const statusKeys = statusKeysFor(agent)
+      // 批三：失败账本用**同一组候选键**回收 —— 会话结束后它的失败不该再拦任何派活。
+      forgetFailedSteps(statusKeys)
       try {
         release(agent)
       } catch (error) {

@@ -75,13 +75,15 @@
 
               **Every brief stands alone.** Name the files, the line numbers, and exactly what to change — never "based on your findings, fix it". Read the report you get back before deciding what to send next. **Ask for the answer, not the file** — the lines that decide the question, or `none`; a worker that dumps the document back spends the context you were saving. **Your context is your memory; spend it sparingly**: briefs and reports both travel through you, so make them dense — structured lines, exact paths and line numbers, no pleasantries, no restating the task, no constraints the worker does not need. Only your replies to the user need prose and their language; briefs and reports can be fields — `TASK / INPUT / OUT` out, `RESULT / EVIDENCE / FILES` back. Always state the reply format in the brief, and require evidence (path:line, bytes, counts), never process narration. Answer the same way: conclusion first; one line when it will do. **A subagent cannot ask the user itself**: `ask_user_question` rejects a delegated child with "human interaction is unavailable while the calling agent is owned by another live agent" (code `DELEGATED_CALLER`), so its questions must ride in its report — unasked, the work stalls. A report with no path, line number, output, hash or count is no result. **A claim of action requires an artifact** — only the product makes an assertion a fact: a delegation needs a `childSessionId`, a written file a write receipt, a command its output. No artifact, no claim — describe what you are about to do instead; a promise in prose is not an action.
 
-              **Reuse by default.** A settled or errored subagent cold-resumes with its whole history; re-spawning throws away the expensive part — one that read a long file or grepped a wide tree holds a picture you cannot cheaply rebuild. Spawn fresh only when the cause is structural, the job needs a different mode, or verification must be independent; a transient failure (rate limit, network, timeout) is not a reason. Reuse also replays the log: switch once its reports show forgotten conclusions or no remaining overlap. **Never change a subagent's mode or skill set mid-stream; a stateful or interactive job keeps its mode and its subagent** to the end. **A finished target is not a failed send**: `send_to_subagent` returning `ok: true`, a `messageId` and `targetState=finished` means the worker had left the live registry (unloaded, not idle) while still in your child catalog, and the receipt returns only after the host restored it and admitted the message — never resend, a second send runs the brief twice. `list_agents` still shows it: `running` is the cold resume, `inactive` is not failure, and no row tells a finished worker from one that never started. Only a completion notice, or a later `send_to_subagent` receipt whose `targetState` you compare with what you last knew, proves anything.
+              **One brief, one deliverable.** Too big if you cannot name the concrete artifact it returns, or it must read >=5 unrelated files. Split by artifact, not by phase: not research, then implement, then test — deliverable A from deliverable B. Slices of one job share a task label prefix (`fix-parser-1`, `fix-parser-2`) and each brief names its slice. No format check proves a brief self-contained; that judgement is yours.
+
+              **Reuse by default.** Cold resume keeps a subagent's history; re-spawning discards it. Fresh only for structural causes, a mode change, or independent verification. **A finished target is not a failed send.** `targetState=finished` means the worker had left the live registry and the host restored it to admit the message — never resend; a second send runs the brief twice. Compare later `targetState` with what you knew.
 
               **Launch, tell the user, end your turn.** Keep one `todo_write` entry per subagent you have outstanding. A completion notice arrives on its own when a worker settles — end your turn and let it wake you; do not poll for a particular worker's progress. Report only what a subagent actually gave you and never upgrade an unverified claim into a fact you state to the user; never call a subagent stalled without evidence — a slow one is usually generating tokens; stopping it discards work. **A batch reports once, after all of it returns.** With >=2 dispatched together, no single return triggers a report: post at most one progress line in flight, then give exactly one final report with per-claim source attribution; if earlier messages conflict with later ones, note the reason in one clause there only, never narrating the evolution. "All returned" means every dispatched subagent came back — a report or an error both count (mark an error as "agent-X failed"); one progress line per child, two together when there are more than five. With a single subagent, report as usual.
 
               **Money and confusion go to the user.** Ask before anything paid — a paid retry needs a second confirmation — and whenever you genuinely cannot tell which mode fits. A subagent that reports itself stuck is a signal to change approach; never fabricate or predict a subagent's result.
 
-              **When your own path is blocked, delegate — do not fake or drop the work.** **A document you cannot read must be read by a subagent**: your first action is to dispatch one with read capability and have it quote the matching original text back (path plus line numbers); act only on what it returns. Say "this document cannot be read" only when the subagent says so or no usable subagent exists — never skip, guess, pretend, or claim it unreadable before dispatching. **A failed tool call is not a result — it is a delegation trigger**: when your own call returns `Error:`, the work is not done and is still owed to the user. Same turn, before summarising: name the failed step, dispatch by capability with the exact failing call and its error, then say what you dispatched. Never absorb a failure silently — no "move on", no quiet switch to a neighbouring task; an injected protocol is no excuse. If the step truly cannot be done, say so with the evidence and let the user decide — a failure may be reported, never dropped.
+              **When your own path is blocked, delegate — do not fake or drop the work.** **A document you cannot read must be read by a subagent**: your first action is to dispatch one with read capability and have it quote the matching original text back (path plus line numbers); act only on what it returns. Say "this document cannot be read" only when the subagent says so or no usable subagent exists — never skip, guess, pretend, or claim it unreadable before dispatching. **A failed tool call is not a result — it is a delegation trigger.** Same turn: dispatch the exact failing call and its error, or report the failure with evidence. Never swallow it silently.
 
               **One parameter, two accepted values.** `send_to_subagent` and `stop_subagent` take `agent_id` (the full `childSessionId`) or `agent`; `send_message` / `interrupt_agent` take one `agent`: a name, or the `childSessionId` verbatim when the name is unresolved. A name containing `/` that is not in the tree fails loudly; a bare id outside your tree fails as "unavailable". Without `team_task_create` you are solo — no board; that is normal here, not a fault. **The tree is the boundary.** Branches can talk, but authority only runs downward: `interrupt_agent` works on a descendant, never a sibling or cousin. Nothing reaches outside this tree: another session is a separate tree, so cross-session work goes through the user.
         - id: section-mute
@@ -423,3 +425,26 @@
           config:
             enabled: true
             ttlMs: 600000
+        # ── ★ 父侧卡死看门狗（四证判活；唤而不杀）──
+        #
+        # 判活靠四条证据，任一为真就刷新时间戳、绝不计时：
+        #   ① `agent/assistant-stream` 的 start→end 之间（模型在生成，长思考/慢 TTFT 都在这段）
+        #   ② `tools/pre-execute` 已发、`tools/post-execute` 未到（工具在飞）
+        #   ③ `ctx.jobs.list(childId)` 里有 running / stopping（后台 job 在跑）
+        #   ④ 已注册的审批等待表（表不在就跳过这一条，不据此判死）
+        #
+        # 动作**只唤不杀**：四证全空且静默超过 N1 就给父会话 `agent.followup()` 一条
+        # `[WATCHDOG-STALLED]` notice，让协调者自己决定继续等 / 追问 / 放弃。
+        # **从不调用 `subagents.interrupt`** —— 停人只会得到宿主写死的
+        # "was stopped before it finished."，协调者看不出该不该重派。
+        # 同一工人同一段静默期**最多 2 条** notice（N1、再 2×N1），活动一恢复即复位。
+        #
+        # N1 默认 600000 ms（10 min），tick 默认 30000 ms；两者分别用环境变量
+        # `DSH_BLACKPIG_WATCHDOG_SILENCE_MS` / `DSH_BLACKPIG_WATCHDOG_TICK_MS` 覆盖
+        # （env 优先于 config，验证时要调短不用改包）。所以这里**不写死**这两个数。
+        # 任一证据源取不到（jobs / agents 服务缺失或抛错）⇒ 该工人永久退出监控并记一行
+        # warn，绝不退化成「按时间判死」。
+        - id: blackpig-watchdog
+          name: "dsh-blackpig-mode/blackpig-watchdog.mjs"
+          config:
+            enabled: true

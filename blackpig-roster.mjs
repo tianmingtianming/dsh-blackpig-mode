@@ -33,7 +33,7 @@
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 
-import { callSendMessage, readCallerChildCatalog, resolveTargetId } from './compat.mjs'
+import { callSendMessage, callerSessionIdsOf, readCallerChildCatalog, resolveTargetId } from './compat.mjs'
 
 
 /** Cordis 插件名，用于 loader 诊断。 */
@@ -953,11 +953,344 @@ function applyMaxDepth(request, subagents) {
   }
 }
 
+// ── 批二①：brief 三段校验 ─────────────────────────────────────────────────────
+//
+// 为什么在工具入参处拦：`subagent_preset` 的 description 自己就写着「worker 看不到
+// 本对话」，但模型仍会把「见上」「接着做」这种 brief 派出去 —— worker 拿一句无法执行
+// 的话空烧一整轮，而大脑那边只看到「已派活」。三行标签的成本远低于一次白烧。
+//
+// 判据**故意宽**（宁漏不误杀）：正文里出现 TASK / INPUT / OUT 三个词（大小写不限，
+// `TASK:` / `**TASK**` / `TASK<换行>` / `- TASK` / `## TASK` / `TASK：` 全部命中）
+// 就算结构在。任何形状检查（必须独占一行、必须带冒号、必须按顺序）都会误杀真实
+// brief —— 那是比漏拦更坏的错。
+
+/** 三段标签的判据表：`[标签名, 宽松正则]`。 */
+const BRIEF_LABELS = [
+  ['TASK', /\bTASKS?\b/i],
+  ['INPUT', /\bINPUTS?\b/i],
+  ['OUT', /\bOUT(?:PUT)?S?\b/i],
+]
+
+/**
+ * 缺哪几段。
+ *
+ * 纯函数、不读 ctx：`subagent_preset`（prompt）与 `send_to_subagent`（message）
+ * 共用这一份判据，两处各写一个正则必然会漂。
+ *
+ * @param text - 要派出去的正文。
+ * @returns {string[]} 缺的标签名（`[]` = 三段齐全）。
+ */
+export function briefGaps(text) {
+  if (typeof text !== 'string') return BRIEF_LABELS.map(([label]) => label)
+  return BRIEF_LABELS.filter(([, pattern]) => !pattern.test(text)).map(([label]) => label)
+}
+
+/**
+ * 三段校验的拒绝文案 + **可执行**修法（两处调用点共用，避免文案漂移）。
+ *
+ * @param missing - `briefGaps()` 的返回值。
+ * @returns {{ code: string, message: string, nextAction: string }}
+ */
+export function briefRefusal(missing) {
+  const list = Array.isArray(missing) && missing.length > 0 ? missing.join('、') : 'TASK、INPUT、OUT'
+  return {
+    code: 'brief-not-structured',
+    message:
+      `你的 brief 缺 ${list}。worker 看不到本对话，补三行：` +
+      '`TASK:` 干什么 / `INPUT:` 读哪些文件（绝对路径）/ ' +
+      '`OUT:` 要什么回来（写明「回 RESULT / EVIDENCE / FILES，EVIDENCE 给 path:line 或字节数」）。',
+    nextAction:
+      `把缺的 ${list} 段补进原 brief（一行一段），然后原样重发这次调用：` +
+      '`TASK: <这件活要干什么>` / `INPUT: <要读的文件绝对路径，一行一个>` / ' +
+      '`OUT: 回 RESULT / EVIDENCE / FILES，EVIDENCE 给 path:line 或字节数`。',
+  }
+}
+
+// ── 批二②：`task` 标签 + 派发去重 ─────────────────────────────────────────────
+//
+// 「同一件事派两个工人」在黑猪里是最贵的一种重复：两份并行工作、两倍 token，
+// 而汇报都写着完成。判据用**调用方给的标签**（`task`），不是语义相似度 ——
+// 相似度判据（desc / prompt 像不像）已在 2026-11-24 的复核里被否掉
+// （I7：上下文重叠 ≠ 任务相似），这里不重开那个口子。
+//
+// 状态放 `globalThis[Symbol.for(...)]`：进程内、不进磁盘。用 globalThis 是因为同一
+// 进程里 preset scope 可能 apply 多次（HMR），而「这个 slug 现在归谁」是全局事实；
+// 用 `Symbol.for` 是因为它不进 JSON、也不会和别的插件撞键。
+
+/** 派活去重表的进程内键。 */
+export const DISPATCH_CLAIMS_KEY = Symbol.for('dsh-blackpig-mode:dispatch-claims:v1')
+
+/** 去重记录 TTL 兜底（默认 1 小时）：`agent/disposed` 漏了也不会永久占住一个 slug。 */
+export const DEFAULT_DISPATCH_TTL_MS = 3600000
+
+/** 需求原文用 `DASH_DISPATCH_TTL_MS` 指这个常量，保留同名导出以便对表。 */
+export const DASH_DISPATCH_TTL_MS = DEFAULT_DISPATCH_TTL_MS
+
+/** TTL 覆盖用的环境变量名（验证时调短）。 */
+export const DISPATCH_TTL_ENV = 'DSH_BLACKPIG_DISPATCH_TTL_MS'
+
+/** 归一化后的 `task` 标签长度上限。 */
+export const TASK_SLUG_MAX = 64
+
+/**
+ * 取（或建）进程内的派活去重表。
+ *
+ * 形状固定 `{ claims: Map<key, { childSessionId, at, done }> }`；别处留下形状不对的
+ * 同名属性就重建 —— 半损坏的状态比空状态更危险（可能让某个 slug 永远判成「有主」）。
+ *
+ * @returns {{ claims: Map<string, { childSessionId: string, at: number, done: boolean }> }}
+ */
+function dispatchClaimsState() {
+  const bag = globalThis
+  let current = bag[DISPATCH_CLAIMS_KEY]
+  if (
+    current === undefined ||
+    current === null ||
+    typeof current !== 'object' ||
+    !(current.claims instanceof Map)
+  ) {
+    current = { claims: new Map() }
+    bag[DISPATCH_CLAIMS_KEY] = current
+  }
+  return current
+}
+
+/**
+ * 把 `task` 归一化成 tag 化 slug。
+ *
+ * 顺序固定：小写 → 空白换 `-` → 只留 `[a-z0-9._-]` → 去首尾 `-` → 截到 64。
+ * 先换空白再过滤，`fix parser bug` 才得到 `fix-parser-bug` 而不是 `fixparserbug`。
+ * 归一化后为空（全非法字符 / 只有空白的中文标签）由调用方拒 `task-invalid`。
+ *
+ * @param raw - 调用方给的 `task`。
+ * @returns {string} slug；非法则为空串。
+ */
+export function normalizeTaskSlug(raw) {
+  if (typeof raw !== 'string') return ''
+  return raw
+    .toLowerCase()
+    .replace(/\s+/g, '-')
+    .replace(/[^a-z0-9._-]/g, '')
+    .replace(/^-+/, '')
+    .replace(/-+$/, '')
+    .slice(0, TASK_SLUG_MAX)
+}
+
+/**
+ * 读一个 agent 的会话 id（`session.id`，兜 `agent.id`），全程兜错。
+ *
+ * 两次读取各自兜错：disposed 时 `session` 可能已被拆掉，`id` 也可能是 throwing getter。
+ * 与 `subtalk.mjs` 的 `agentScopeKeyOf()` 同一口径（子会话里两者一般同名）。
+ *
+ * @param agent - 宿主 agent 对象。
+ * @returns {string|undefined}
+ */
+function sessionIdOfAgent(agent) {
+  try {
+    const sessionId = agent?.session?.id
+    if (typeof sessionId === 'string' && sessionId !== '') return sessionId
+  } catch {
+    // 读 session.id 抛错，继续试 agent.id。
+  }
+  try {
+    const agentId = agent?.id
+    if (typeof agentId === 'string' && agentId !== '') return agentId
+  } catch {
+    // 连 agent.id 都读不出：调用方按「没有身份」处理。
+  }
+  return undefined
+}
+
+/**
+ * 三态存活判定：`alive` / `dead` / `unknown`（与 `blackpig-file-guard` 的同名判据同取向）。
+ *
+ * `unknown`（agents 服务取不到 / 读抛错）**不据此释放** —— 服务未就绪就把整张表清掉，
+ * 正好会让去重在最需要它的窗口里失效。
+ *
+ * @param ctx - 插件上下文。
+ * @param id - childSessionId。
+ * @returns {'alive'|'dead'|'unknown'}
+ */
+function livenessOf(ctx, id) {
+  let agents
+  try {
+    agents = ctx.get?.('agents')
+  } catch {
+    return 'unknown'
+  }
+  if (agents === undefined || agents === null || typeof agents.get !== 'function') return 'unknown'
+  let live
+  try {
+    live = agents.get(id)
+  } catch {
+    return 'unknown'
+  }
+  return live === undefined || live === null ? 'dead' : 'alive'
+}
+
+/**
+ * 解析去重 TTL：config 优先，其次环境变量，最后默认值。非法值一律回落（配置打错不抛）。
+ *
+ * @param config - `apply()` 收到的配置。
+ * @returns {number} 毫秒。
+ */
+export function resolveDispatchTtl(config) {
+  const fromConfig = config?.ttlMs
+  if (Number.isInteger(fromConfig) && fromConfig > 0) return fromConfig
+  let raw
+  try {
+    raw = process.env?.[DISPATCH_TTL_ENV]
+  } catch {
+    raw = undefined
+  }
+  if (typeof raw === 'string' && raw.trim() !== '') {
+    const parsed = Number(raw)
+    if (Number.isFinite(parsed) && parsed > 0) return Math.floor(parsed)
+  }
+  return DEFAULT_DISPATCH_TTL_MS
+}
+
+/**
+ * 每次判定前 prune：**过期且确认已不在活注册表**才释放。
+ *
+ * 为什么活着就不清（哪怕已超 TTL）：TTL 是「disposed 事件漏了」的兜底，不是占用上限。
+ * 一个还活着的工人占着 slug 正是这个机制要的效果 —— 清掉它等于允许再派一个同样的活。
+ *
+ * @param stateBag - `dispatchClaimsState()`。
+ * @param ctx - 插件上下文。
+ * @param ttlMs - 本次判定的 TTL。
+ * @param now - 本次判定的时刻。
+ */
+function pruneDispatchClaims(stateBag, ctx, ttlMs, now) {
+  for (const [key, claim] of [...stateBag.claims]) {
+    const at = typeof claim?.at === 'number' ? claim.at : 0
+    if (now - at < ttlMs) continue
+    if (livenessOf(ctx, claim?.childSessionId) === 'alive') continue
+    stateBag.claims.delete(key)
+  }
+}
+
+/**
+ * 释放某个 childSessionId 名下的**全部**去重记录（`agent/disposed` 用）。
+ *
+ * @param stateBag - `dispatchClaimsState()`。
+ * @param childSessionId - 被释放的子会话 id。
+ * @returns {number} 释放条数。
+ */
+function releaseDispatchClaimsOf(stateBag, childSessionId) {
+  let released = 0
+  for (const [key, claim] of [...stateBag.claims]) {
+    if (claim?.childSessionId === childSessionId) {
+      stateBag.claims.delete(key)
+      released += 1
+    }
+  }
+  return released
+}
+
+/**
+ * 只读快照（诊断 / 离线单测用）。返回深拷贝，调用方改不坏内部状态。
+ *
+ * @returns {Record<string, { childSessionId: string, at: number, done: boolean }>}
+ */
+export function dispatchClaimsSnapshot() {
+  try {
+    const out = {}
+    for (const [key, claim] of dispatchClaimsState().claims) out[key] = { ...claim }
+    return out
+  } catch {
+    return {}
+  }
+}
+
+/**
+ * `duplicate-task` 的拒绝文案：说清是谁在做、做了多久、两条可执行出路。
+ *
+ * @param claim - 已有的去重记录。
+ * @param slug - 归一化后的 task 标签。
+ * @param now - 判定时刻。
+ * @returns {string}
+ */
+function duplicateTaskMessage(claim, slug, now) {
+  const id = typeof claim?.childSessionId === 'string' ? claim.childSessionId : '<unknown>'
+  const at = typeof claim?.at === 'number' ? claim.at : now
+  const seconds = Math.round(Math.max(0, now - at) / 100) / 10
+  return (
+    `\`task=${slug}\` 已由 worker ${id.slice(0, 8)} 在做（${seconds}s）。` +
+    `要补充要求就 \`send_to_subagent(agent_id=${id})\`；` +
+    '确实要另起一件不同的活，就换一个 task 标签。'
+  )
+}
+
+/**
+ * 读一个可复用 worker 的模式（preset id）。
+ *
+ * 三种来源，按「便宜且可信」排序：
+ *   ① 可复用行自带的模式字段（有的宿主版本在投影行上带 `preset` / `agentPreset`）；
+ *   ② 活 agent 的会话头 `session.header.agentPreset`（worker 还活着时最可靠）；
+ *   ③ 已落盘会话头 `sessionQuery.observeSession(id).header.agentPreset`（冷 worker 用）。
+ *
+ * ⚠️ 绝不把可复用行上的 `mode` 当模式用：那个字段是**生命周期**
+ * （`continuable` / `one-shot` / `external`），与 preset 无关 —— 拿它比对会把
+ * 每一次复用都误拒成 `reuse-mode-mismatch`。
+ *
+ * 全取不到 → `undefined`：调用方**跳过校验并 warn**，宁可漏拦也不误拒。
+ *
+ * @param ctx - 插件上下文。
+ * @param rows - `reusableChildrenOf()` 的行（已含 `mode === 'continuable'`）。
+ * @param id - 解析出的 worker id。
+ * @param signal - 取消信号。
+ * @returns {Promise<string|undefined>}
+ */
+async function reuseModeOf(ctx, rows, id, signal) {
+  const row = Array.isArray(rows) ? rows.find((item) => item?.id === id) : undefined
+  for (const field of ['preset', 'agentPreset', 'presetId']) {
+    const value = row?.[field]
+    if (typeof value === 'string' && value.trim() !== '') return value.trim()
+  }
+  let agents
+  try {
+    agents = ctx.get?.('agents')
+  } catch {
+    agents = undefined
+  }
+  if (agents !== undefined && agents !== null && typeof agents.get === 'function') {
+    try {
+      const preset = agents.get(id)?.session?.header?.agentPreset
+      if (typeof preset === 'string' && preset.trim() !== '') return preset.trim()
+    } catch {
+      // 读不到就换下一个来源。
+    }
+  }
+  let query
+  try {
+    query = ctx.get?.('sessionQuery')
+  } catch {
+    query = undefined
+  }
+  if (query !== undefined && query !== null && typeof query.observeSession === 'function') {
+    let observation
+    try {
+      observation = await query.observeSession(id, { signal, projectionMode: 'none' })
+      const preset = observation?.header?.agentPreset
+      if (typeof preset === 'string' && preset.trim() !== '') return preset.trim()
+    } finally {
+      // lease 必须释放，否则会把冷读的 Session 钉在观察缓存里（容量 5）。
+      try {
+        observation?.[Symbol.dispose]?.call?.(observation)
+      } catch {
+        // 释放失败不影响判定结论。
+      }
+    }
+  }
+  return undefined
+}
+
 /**
  * 装载本模块。
  *
  * @param ctx - preset scope 的插件上下文。
- * @param config - `{ enabled, selfPresetId, disabledPresets, toolsCachePath }`。
+ * @param config - `{ enabled, selfPresetId, disabledPresets, toolsCachePath, ttlMs? }`。
  * @returns void。
  */
 export function apply(ctx, config) {
@@ -1002,6 +1335,29 @@ export function apply(ctx, config) {
     }
     return picked
   })()
+
+  // ── 批二②：派活去重表的释放路径 ────────────────────────────────────────────
+  // 子会话结束 = 那个 slug 可以再派。`agent/disposed` 是 emit（不是 serial），监听器
+  // 抛错只被宿主 warn 掉、不会传染；这里仍整体包 try —— disposed 时 `session` 可能
+  // 已被拆掉，我们的读路径必须容忍读不到（读不到就什么都不做）。
+  // 注：`blackpig-file-guard.mjs` 也监听同一事件，但它管的是**它自己的**文件占用表；
+  // 去重表是另一份状态（globalThis 上的另一个 Symbol），不能被它清掉，所以要自己注册。
+  try {
+    ctx.on('agent/disposed', (payload) => {
+      try {
+        const id = sessionIdOfAgent(payload?.agent)
+        if (id === undefined) return
+        releaseDispatchClaimsOf(dispatchClaimsState(), id)
+      } catch (error) {
+        warn(
+          'releasing dispatch claims of a disposed agent threw — a stale claim may outlive the session. ' +
+            'Underlying error: ' + (error instanceof Error ? error.message : String(error)),
+        )
+      }
+    })
+  } catch (error) {
+    warn(`could not subscribe to agent/disposed: ${error instanceof Error ? error.message : String(error)}`)
+  }
 
   /**
    * 取服务。Cordis 的服务查找沿父链上溯，preset 内的 scope 也能取到宿主平面那一份。
@@ -1136,6 +1492,38 @@ export function apply(ctx, config) {
       return failure('prompt-required', 'A non-empty `prompt` is required: the worker does not see this conversation.', { stop: true })
     }
 
+    // ── 批二①：brief 三段校验（TASK / INPUT / OUT 三段缺一即拒）──────────────
+    // 放在「有没有 prompt」之后、其余一切之前：这是纯入参检查，不读服务、不起会话，
+    // 拒掉一次不合格 brief 的成本是一个回执，放过去的成本是 worker 空烧一整轮。
+    const gaps = briefGaps(prompt)
+    if (gaps.length > 0) {
+      const refusal = briefRefusal(gaps)
+      return failure(refusal.code, refusal.message, {
+        stop: false,
+        nextAction: refusal.nextAction,
+        degraded: ['brief-not-structured'],
+      })
+    }
+
+    // ── 批二②：`task` 必填 + 归一化 ────────────────────────────────────────────
+    // `task` 是**调用方**给这件事起的唯一标签，同一件事必须用同一个标签 —— 去重键就
+    // 建立在它上面。归一化不合法（空 / 全非法字符）时明确拒绝，而不是猜一个标签。
+    const taskSlug = normalizeTaskSlug(args?.task)
+    if (taskSlug === '') {
+      return failure(
+        'task-invalid',
+        `\`task\` 必须是可用标签（收到 ${JSON.stringify(args?.task ?? null)}，归一化后为空）。` +
+          `规则：小写、空格换成 \`-\`、只留 [a-z0-9._-]、最多 ${TASK_SLUG_MAX} 字符，` +
+          '例如 `fix-parser` / `batch2.brief-check`。同一件事每次都用同一个标签。',
+        {
+          stop: false,
+          presetId,
+          nextAction: '给这次派活起一个稳定标签（只含 a-z 0-9 . _ -，≤64 字符，例如 `fix-parser`），填进 `task` 后原样重发。',
+          degraded: ['task-invalid'],
+        },
+      )
+    }
+
     const parent = exec?.agent
     if (parent === undefined || parent === null) {
       return failure('no-caller', NO_CALLER_MESSAGE, { stop: true })
@@ -1203,6 +1591,42 @@ export function apply(ctx, config) {
             'reuse-id-unresolved',
             `reuseId resolved to ${resolved.id}, which is not a reusable worker of this conversation.`,
             { stop: true },
+          )
+        }
+
+        // ── 批二③：`reuseId` 的模式必须与本次 `preset` 一致 ──────────────────
+        // 复用**不能改模式**：`send_to_subagent` 只在既有 worker 里加一轮，它的 preset
+        // 是会话头里冻住的。模式不符时悄悄按旧模式跑，是「看起来派给了 B、其实还是 A」。
+        // 取不到 worker 的模式 → **跳过校验并 warn**（宁可漏拦，不可误拒）。
+        try {
+          const workerMode = await reuseModeOf(ctx, reusable, resolved.id, exec?.signal)
+          if (workerMode === undefined) {
+            warn(
+              `cannot determine the preset of reusable worker ${resolved.id} ` +
+                '(no preset field on the catalog row, no live agent, no readable session header); ' +
+                'skipping the reuse-mode check for this call',
+            )
+          } else if (workerMode !== presetId) {
+            return failure(
+              'reuse-mode-mismatch',
+              `worker ${resolved.id} 的模式是 ${workerMode}，你传的是 ${presetId}。` +
+                '`send_to_subagent` 不能改模式：要么 reuseId 指向 ' +
+                `${workerMode} 的 worker，要么 \`fresh:true\` 新开一个 ${presetId}。`,
+              {
+                stop: false,
+                presetId,
+                nextAction:
+                  `二选一：① 把 reuseId 指向 ${workerMode} 模式的 worker；` +
+                  `② 传 \`fresh: true\` 新开一个 ${presetId} 的 worker（不要同时传 reuseId）。`,
+                degraded: ['reuse-mode-mismatch'],
+              },
+            )
+          }
+        } catch (error) {
+          // 失败安全：校验器自己炸了，绝不能堵死一次合法的复用。
+          warn(
+            'the reuse-mode check threw; allowing the resume. Underlying error: ' +
+              (error instanceof Error ? error.message : String(error)),
           )
         }
         try {
@@ -1296,6 +1720,42 @@ export function apply(ctx, config) {
     const unusable = await presetUnusable(presetId)
     if (unusable !== undefined) return unusable
 
+    // ── 批二②：同一调用方 + 同一 `task`，只许一个工人在做 ──────────────────────
+    // 走到这里 = 本次会**新建**子会话：`reuseId` 路径已在上面 return（复用同一个工人
+    // 继续干活是合法的，不登记也不判重 —— 所以有 claim 的 worker 被 reuse 也不报错）。
+    // 位置在 `presetUnusable()` 之后：模式本身不可用时先报那个，别拿「重复」盖住
+    // 「这个模式根本派不了」。
+    //
+    // 失败安全：去重是省钱的保险，不是派活的前置条件 —— 任何内部异常都必须放行。
+    // 只有「确定有活的重复」才拒（错误地拒死一次活的代价，远高于漏拦一次重复）。
+    const callerSessionId = callerSessionIdsOf(parent)[0] ?? ''
+    let dispatchKey = ''
+    if (callerSessionId !== '') {
+      try {
+        const now = Date.now()
+        const claims = dispatchClaimsState()
+        pruneDispatchClaims(claims, ctx, resolveDispatchTtl(config), now)
+        dispatchKey = `${callerSessionId}::${taskSlug}`
+        const existing = claims.claims.get(dispatchKey)
+        if (existing !== undefined) {
+          return failure('duplicate-task', duplicateTaskMessage(existing, taskSlug, now), {
+            stop: false,
+            presetId,
+            nextAction:
+              `要给同一个工人补要求就用 \`send_to_subagent(agent_id=${existing.childSessionId})\`；` +
+              '确实要另起一件不同的活，就换一个 `task` 标签。',
+            degraded: ['dispatch-deduped'],
+          })
+        }
+      } catch (error) {
+        dispatchKey = ''
+        warn(
+          'the dispatch-dedup check threw; allowing the dispatch. Underlying error: ' +
+            (error instanceof Error ? error.message : String(error)),
+        )
+      }
+    }
+
     const subagents = serviceOf('subagents')
     if (subagents === undefined || typeof subagents.startActivation !== 'function') {
       return failure('subagents-unavailable', 'The subagent service is unavailable, so no mode can be dispatched to.', { stop: true, presetId })
@@ -1332,6 +1792,22 @@ export function apply(ctx, config) {
       // 1.1.0：把这个 preset 的子会话 id 记进工具面缓存（只记 childId，不覆盖已有 tools）。
       // 下一次 `list: true` 就能回看该子会话拿实测工具表，不必再派探针。写失败只 warn。
       await recordChildCapture(presetId, childSessionId)
+      // 批二②：**派发成功后**才登记去重记录 —— 失败 / 无 childId 不该占住 slug，
+      // 否则一次失败的派活会把这件事永久锁死。登记失败只 warn（去重是尽力而为）。
+      if (dispatchKey !== '') {
+        try {
+          dispatchClaimsState().claims.set(dispatchKey, {
+            childSessionId,
+            at: Date.now(),
+            done: false,
+          })
+        } catch (error) {
+          warn(
+            'recording the dispatch claim failed; duplicate detection is best-effort for this call. ' +
+              'Underlying error: ' + (error instanceof Error ? error.message : String(error)),
+          )
+        }
+      }
       return {
         ok: true,
         presetId,
@@ -1343,7 +1819,7 @@ export function apply(ctx, config) {
           'its path from the root, and a `running` row means it is working now. Tell the user ' +
           'what you dispatched, ' +
           'then either end your turn (its completion notice will wake you) or do independent work ' +
-          'that touches different files.',
+          'that writes different files (a peer write to a file another worker holds is rejected).',
         evidence: {
           broken: null,
           presetId,
@@ -1473,6 +1949,8 @@ export function apply(ctx, config) {
         '`preset` is REQUIRED — there is no default, because the wrong default silently wastes a ' +
         'whole run. Call `list: true` first; pick by capability ranges, not mode name. An installed mode missing from the roster can still be dispatched if you know its id. ' +
         'When reusable workers already exist in this conversation you MUST choose explicitly: pass `reuseId` (a childSessionId from the roster or a prior receipt) to cold-resume one, or `fresh: true` to start a new worker; otherwise the call is refused with `reusable-worker-exists` and up to 3 candidates. When no reusable worker exists, neither is needed. ' +
+        'Briefs must be structured, because the worker sees nothing of this conversation: `TASK:` what to do, `INPUT:` which files to read (absolute paths), `OUT:` what to return (say `RESULT / EVIDENCE / FILES`, and that EVIDENCE needs `path:line` or byte counts). A brief missing any of the three is refused with `brief-not-structured`. ' +
+        '`task` is a stable slug for this one job: reusing the same tag while a worker is still on it is refused with `duplicate-task` (send that worker a follow-up instead, or pick a different tag). ' +
         'A returned `degraded` field is absent when nothing degraded; `stop: true` means do not retry. The ' +
         'worker does not see this conversation. It starts in the background and this call returns its ' +
         'id immediately.',
@@ -1486,18 +1964,26 @@ export function apply(ctx, config) {
           },
           prompt: {
             type: 'string',
-            description: 'The complete, self-contained task. The worker runs under a DIFFERENT mode.',
+            description:
+              'The complete, self-contained task, labelled `TASK:` / `INPUT:` / `OUT:`. ' +
+              'The worker runs under a DIFFERENT mode and cannot see this conversation.',
           },
           description: {
             type: 'string',
             description: 'A short (3-5 word) label for display.',
+          },
+          task: {
+            type: 'string',
+            description:
+              '这件事的唯一标签：同一件事用同一个标签（派过一次就别换写法），换一件事才换标签。' +
+              '小写字母/数字/点/下划线/连字符，不超过 64 字符，例如 `fix-parser`。同一标签在同一个调用方下只允许一个活着的工人。',
           },
           list: {
             // `list` 是纯 boolean：`{ all: true }` 分支已于 2026-11-14 移除（只服务旧基准流程，且绕过 hidden 过滤）。
             type: 'boolean',
             description:
               '`true` returns the roster — a global numbered tool index plus per-mode tool-number ranges, ' +
-              'and the installed skills.',
+              'and the installed skills. This branch needs neither `preset` nor `task`.',
           },
           reuseId: {
             type: 'string',
@@ -1511,7 +1997,7 @@ export function apply(ctx, config) {
               'Explicitly start a new worker even when reusable ones exist. Mutually exclusive with `reuseId`.',
           },
         },
-        required: [],
+        required: ['task'],
       },
       output: {
         schema: OUTPUT_SCHEMA,

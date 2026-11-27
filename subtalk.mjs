@@ -95,6 +95,9 @@ import {
   resolveTargetId,
   targetOf,
 } from './compat.mjs'
+// brief 三段判据只有一份：`subagent_preset` 与 `send_to_subagent` 是同一条「给 worker
+// 派活」契约的两个入口，各写一个正则必然漂（改了 A 忘了 B 就是两套标准）。
+import { briefGaps, briefRefusal } from './blackpig-roster.mjs'
 
 export const name = 'blackpig-subtalk'
 
@@ -598,7 +601,9 @@ export function apply(ctx, config) {
         'NOT that the child stopped or read it. `interrupt=true` hands a cancel request to the host ' +
         '(no receipt): `interruptRequested=true` / `interruptVerified=false` means requested, not confirmed. ' +
         'TIMING: an interrupted running child receives this at its NEXT TURN, not the step boundary — ' +
-        'the in-flight action may finish before your correction is read. Team members: use `send_message`.',
+        'the in-flight action may finish before your correction is read. Team members: use `send_message`. ' +
+        'The message must carry `TASK:` / `INPUT:` / `OUT:` labels (same brief contract as `subagent_preset`); ' +
+        'one missing any of them is refused with `brief-not-structured` and nothing is sent.',
       // ⚠️ 2026-11-06 通用化：目标参数改成「两种名字都收」。
       //   · 旧宿主（rc.1 及以前）只有 agent_id（会话 id）；
       //   · 新宿主（master，预计 rc.2）改叫 agent 且语义变成**名字**。
@@ -753,6 +758,25 @@ export function apply(ctx, config) {
             targetState: target.state,
           }
         }
+
+        // ── 批二①：brief 三段校验（与 `subagent_preset` 共用同一份判据）──────────
+        // 顺序刻意排在这里：**在发任何中断之前**。一条缺段的消息不可能让 worker 干活，
+        // 先掐掉它正在跑的动作只会白丢一个动作，然后再送来一条读不懂的话。
+        // 本工具的 output schema 没有 nextAction 字段（模型只看得见 render 输出的
+        // `note=`），所以「缺什么 + 怎么补」都写进 reason：前缀是机器可读的 code。
+        const briefGapsFound = briefGaps(args.message)
+        if (briefGapsFound.length > 0) {
+          const refusal = briefRefusal(briefGapsFound)
+          return {
+            ok: false,
+            refused: true,
+            reason: `${refusal.code}: ${refusal.message} 修法：${refusal.nextAction}`,
+            interruptRequested: false,
+            interruptVerified: false,
+            targetState: target.state,
+          }
+        }
+
         let interruptRequested = false
         let interruptReason = ''
         if (shouldInterrupt) {
