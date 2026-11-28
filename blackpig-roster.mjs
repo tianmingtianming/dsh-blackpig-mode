@@ -1379,7 +1379,7 @@ function abbreviatePrefixForReceipt(prefix, budget) {
   if (prefix.length <= budget) return prefix
   const parts = prefix.split('\\').filter((part) => part !== '')
   for (let keep = Math.min(parts.length - 1, 3); keep >= 1; keep--) {
-    const candidate = parts[0] + ':\\...\\' + parts.slice(-keep).join('\\')
+    const candidate = parts[0] + '\\...\\' + parts.slice(-keep).join('\\')
     if (candidate.length <= budget) return candidate
   }
   return prefix.slice(0, Math.max(0, budget - 3)) + '...'
