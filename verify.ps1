@@ -133,7 +133,7 @@ $expected = [ordered]@{
     'package.json'        =  768    # 2026-11-27：files[] 13 项（加 blackpig-watchdog.mjs）；无 BOM
     'README.md'           = 67285   # 记录值；仍在 skipSizeCheck（随文档编辑变化）
     'CHANGELOG.md'        = 40609   # 记录值；仍在 skipSizeCheck（随文档编辑变化）
-    'LICENSE'             = 1073
+    'LICENSE'             = 1094   # 2026-11-28：仓库 LICENSE 实测 1094（原 1073）
     'check.ps1'           = 0       # 在 $skipSizeCheck 里，不参与比对
     'verify.ps1'          = 0       # 自引用：写死自身字节必然追不上，不参与校验
 }
