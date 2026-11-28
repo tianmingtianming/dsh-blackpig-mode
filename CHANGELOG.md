@@ -1,5 +1,17 @@
 # Changelog — dsh-blackpig-mode
 
+## 1.1.0（2026-11-28）：派发路径重叠提醒（只提醒，不拦截）
+
+> **版本号仍是 1.1.0**，不新建 tag；同版本按日期追加（仓库惯例）。本次只加提醒与工具描述文案，不改任何 `ok` / 拒绝语义。
+
+**一句话**：`subagent_preset` 成功派活后，从 brief 的 `INPUT` 抽绝对路径前缀（盘符 + 3 段）记进进程内台账；下一次派活若与本会话此前 worker 的路径前缀重叠，成功回执末尾追加一行 `Overlap: ...`，提示复用或改传盘点笔记。**只提醒、绝不拦截**——解析 / 台账异常只 `warn` 并跳过。
+
+- 台账：`globalThis[Symbol.for('dsh-blackpig-mode:dispatch-paths:v1')]`，`Map<callerSessionId, Array<{ childId, task, prefixes, at }>>`；每会话上限 50 条（FIFO），TTL 与派发去重表一致，`agent/disposed` 释放。
+- 前缀：Windows 绝对路径（盘符 + `\` 或 `/`），取盘符后 3 段（如 `C:\Users\X\Documents`）；每 brief 最多 20 个、去重。
+- 判定：一方是另一方的前缀（大小写不敏感）即重叠；重叠对手 ≥1 且重叠前缀 ≥1 才提醒。文案固定、一行 ≤200 字符。
+- 工具描述：`subagent_preset` 的 brief 参数补「绝对路径一行一个 / 先派盘点 worker、把笔记文件写进 INPUT」；`send_to_subagent` 补「优先用盘点笔记，不重读源码」。
+- 离线验证（独立 HOME + 生产 profile 副本，未重启 DSH）：V1 A 无 `Overlap` / B 含 `Overlap: worker <A 前 8 位>`；V2 C 无 `Overlap`；V3 `brief-not-structured`、`duplicate-task` 仍拒；V4 `list:true` 9 个缓存模式、`blackpig-worker` 30 项、无 `dsh_im_*`。
+
 ## 1.1.0（2026-11-27）：六条硬机制与人格压缩
 
 > **版本号仍是 1.1.0**，不新建版本号（仓库惯例：同版本多节，按日期追加）。本节记本版六条机制与人格压缩；文件守卫的挂载细节见下一节。

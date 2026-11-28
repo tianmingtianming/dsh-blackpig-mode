@@ -604,7 +604,8 @@ export function apply(ctx, config) {
         'the in-flight action may finish before your correction is read. Team members: use `send_message`. ' +
         'The message must carry `TASK:` / `INPUT:` / `OUT:` labels (same brief contract as `subagent_preset`); ' +
         'OUT must name the evidence form: path:line, byte counts, or exact counts. ' +
-        'one missing any of them is refused with `brief-not-structured` and nothing is sent.',
+        'one missing any of them is refused with `brief-not-structured` and nothing is sent. ' +
+        'Prefer the notes file from an earlier inventory worker over re-reading source.',
       // ⚠️ 2026-11-06 通用化：目标参数改成「两种名字都收」。
       //   · 旧宿主（rc.1 及以前）只有 agent_id（会话 id）；
       //   · 新宿主（master，预计 rc.2）改叫 agent 且语义变成**名字**。

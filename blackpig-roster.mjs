@@ -1214,6 +1214,216 @@ function releaseDispatchClaimsOf(stateBag, childSessionId) {
   return released
 }
 
+// ── 派发路径台账（重叠提醒，只提醒、绝不拦截）────────────────────────────────
+//
+// 并行 worker 互不知情时最容易重复读同一片源码。这里在**派发成功之后**记下每个
+// worker 的 brief 里出现过的目录前缀，下一次派发时若能对上，就在回执末尾点名
+// 「这个区域已经有人覆盖过」。
+//
+// 三条硬边界（刻意如此）：
+//   · 只读 brief 文本、只写回执文案 —— 不改 ok/拒绝语义，任何异常一律 catch 后跳过；
+//   · 状态在进程内（globalThis + Symbol.for），不落盘；与派发去重表同 TTL、同释放时机；
+//   · 文案是固定格式，不含时间戳 / 随机量（避免破坏缓存友好性）。
+
+/** 派发路径台账的进程内键：`Map<callerSessionId, Array<{ childId, task, prefixes, at }>>`。 */
+export const DISPATCH_PATHS_KEY = Symbol.for('dsh-blackpig-mode:dispatch-paths:v1')
+
+/** 每个调用方最多保留多少条路径记录（先进先出）。 */
+export const DISPATCH_PATHS_MAX_PER_SESSION = 50
+
+/** 从一条 brief 里最多提取多少个路径前缀。 */
+export const DISPATCH_PATH_PREFIX_MAX = 20
+
+/** Windows 绝对路径：盘符 + `\` 或 `/`；到空白 / 引号 / 常见分隔符为止。 */
+const ABSOLUTE_PATH_RE = /[A-Za-z]:[\\/][^\s"'`<>|?*]*/g
+
+/** 紧贴路径的正文标点不属于路径。 */
+const PATH_TRAILING_PUNCTUATION_RE = /[.,;:!?)\]}'"`，。；：、）】》]+$/
+
+/**
+ * 取（或建）进程内的派发路径台账。
+ *
+ * 形状固定为 `Map<callerSessionId, Array<...>>`；别处留下形状不对的同名属性就重建 ——
+ * 半损坏的状态比空状态更危险。
+ *
+ * @returns {Map<string, Array<{ childId: string, task: string, prefixes: string[], at: number }>>}
+ */
+function dispatchPathsState() {
+  const bag = globalThis
+  let current = bag[DISPATCH_PATHS_KEY]
+  if (!(current instanceof Map)) {
+    current = new Map()
+    bag[DISPATCH_PATHS_KEY] = current
+  }
+  return current
+}
+
+/**
+ * 从 brief 文本里抓绝对路径，取盘符 + 紧跟的 3 段作为前缀。
+ *
+ * 例：`C:\Users\X\Documents\proj\a.md` → `C:\Users\X\Documents`。
+ * 去重按小写（Windows 路径大小写不敏感），最多 {@link DISPATCH_PATH_PREFIX_MAX} 个。
+ *
+ * @param text - brief 的 `prompt` 原文。
+ * @returns {string[]} 前缀（保持原大小写）；抓不到则空数组。
+ */
+export function extractPathPrefixes(text) {
+  const found = []
+  if (typeof text !== 'string' || text === '') return found
+  const seen = new Set()
+  try {
+    for (const match of text.matchAll(ABSOLUTE_PATH_RE)) {
+      let raw = match[0].replace(PATH_TRAILING_PUNCTUATION_RE, '').replace(/[\\/]+$/, '')
+      if (!/^[A-Za-z]:[\\/]/.test(raw)) continue
+      const parts = raw.split(/[\\/]+/).filter((part) => part !== '')
+      if (parts.length < 2) continue
+      // parts[0] 是盘符；「前 3 段」= 盘符后的 3 段，与示例 `C:\Users\X\Documents` 对齐。
+      const head = parts.slice(0, 4)
+      const prefix = head[0] + '\\' + head.slice(1).join('\\')
+      const key = prefix.toLowerCase()
+      if (seen.has(key)) continue
+      seen.add(key)
+      found.push(prefix)
+      if (found.length >= DISPATCH_PATH_PREFIX_MAX) break
+    }
+  } catch {
+    // 正则/字符串异常一律当「没有路径」：提醒缺失不能影响派发。
+  }
+  return found
+}
+
+/**
+ * 两个前缀是否重叠：一方是另一方的前缀（大小写不敏感，判据与需求一致）。
+ *
+ * @param a - 前缀 A。
+ * @param b - 前缀 B。
+ * @returns {boolean}
+ */
+function prefixIsRelated(a, b) {
+  if (typeof a !== 'string' || typeof b !== 'string' || a === '' || b === '') return false
+  const left = a.toLowerCase()
+  const right = b.toLowerCase()
+  return left.startsWith(right) || right.startsWith(left)
+}
+
+/**
+ * 每次派发前 prune：与派发去重表同 TTL、同「活着就不清」取向。
+ *
+ * @param state - `dispatchPathsState()`。
+ * @param ctx - 插件上下文。
+ * @param ttlMs - 本次判定的 TTL。
+ * @param now - 本次判定的时刻。
+ */
+function pruneDispatchPaths(state, ctx, ttlMs, now) {
+  for (const [caller, entries] of [...state]) {
+    if (!Array.isArray(entries)) {
+      state.delete(caller)
+      continue
+    }
+    const kept = entries.filter((entry) => {
+      const at = typeof entry?.at === 'number' ? entry.at : 0
+      if (now - at < ttlMs) return true
+      return livenessOf(ctx, entry?.childId) === 'alive'
+    })
+    if (kept.length === 0) state.delete(caller)
+    else state.set(caller, kept)
+  }
+}
+
+/**
+ * 释放某个 childSessionId 名下的路径记录（`agent/disposed` 用）。
+ *
+ * @param state - `dispatchPathsState()`。
+ * @param childSessionId - 被释放的子会话 id。
+ * @returns {number} 释放条数。
+ */
+function releaseDispatchPathsOf(state, childSessionId) {
+  let released = 0
+  for (const [caller, entries] of [...state]) {
+    if (!Array.isArray(entries)) {
+      state.delete(caller)
+      continue
+    }
+    const kept = entries.filter((entry) => entry?.childId !== childSessionId)
+    released += entries.length - kept.length
+    if (kept.length === 0) state.delete(caller)
+    else state.set(caller, kept)
+  }
+  return released
+}
+
+/**
+ * 生成本次派发的重叠提醒（固定一行，≤200 字符）。
+ *
+ * 阈值：重叠对手 ≥1 且重叠前缀 ≥1；否则返回空串（回执一个字都不加）。
+ *
+ * @param state - `dispatchPathsState()`。
+ * @param callerSessionId - 调用方会话 id。
+ * @param prefixes - 本次 brief 的前缀。
+ * @returns {string}
+ */
+function overlapReminderFor(state, callerSessionId, prefixes) {
+  if (callerSessionId === '' || prefixes.length === 0) return ''
+  const entries = state.get(callerSessionId)
+  if (!Array.isArray(entries) || entries.length === 0) return ''
+  /** @type {Map<string, { count: number, prefix: string }>} */
+  const peers = new Map()
+  const hitPrefixes = new Set()
+  for (const entry of entries) {
+    if (!entry || !Array.isArray(entry.prefixes)) continue
+    for (const oldPrefix of entry.prefixes) {
+      for (const newPrefix of prefixes) {
+        if (!prefixIsRelated(newPrefix, oldPrefix)) continue
+        hitPrefixes.add(newPrefix.toLowerCase())
+        const hit = peers.get(entry.childId) ?? { count: 0, prefix: oldPrefix }
+        hit.count += 1
+        // 展示更宽（更短）的那个，避免显示成只覆盖某一个文件。
+        if (oldPrefix.length < hit.prefix.length) hit.prefix = oldPrefix
+        peers.set(entry.childId, hit)
+      }
+    }
+  }
+  if (peers.size === 0 || hitPrefixes.size === 0) return ''
+  const [peerId, hit] = [...peers.entries()].sort((a, b) => b[1].count - a[1].count)[0]
+  const shortId = typeof peerId === 'string' ? peerId.slice(0, 8) : 'unknown'
+  const suffix =
+    `(${hitPrefixes.size} paths). If 2+ workers share this area, reuse it via send_to_subagent ` +
+    'or pass an inventory notes file as INPUT.'
+  const head = `Overlap: worker ${shortId} already covered `
+  // 固定格式、上限 200：超长前缀按字符截断（不含任何时间/随机量）。
+  const budget = 200 - head.length - suffix.length
+  const shown = hit.prefix.length <= budget ? hit.prefix : hit.prefix.slice(0, Math.max(0, budget - 3)) + '...'
+  return head + shown + suffix
+}
+
+/**
+ * 记录本次派发路径并返回提醒。
+ *
+ * 顺序固定：先 prune → 用**已有**记录判重叠 → 再写入本次记录，所以新 worker 不会
+ * 跟自己对上。抓不到任何路径 → 不记录、不提醒（不参与）。
+ *
+ * @param ctx - 插件上下文。
+ * @param callerSessionId - 调用方会话 id。
+ * @param childSessionId - 新派出的 worker id。
+ * @param task - 归一化后的 task 标签。
+ * @param prompt - brief 原文。
+ * @param ttlMs - TTL。
+ * @returns {string} 提醒文本（可能为空串）。
+ */
+function rememberDispatchPaths(ctx, callerSessionId, childSessionId, task, prompt, ttlMs) {
+  if (callerSessionId === '') return ''
+  const prefixes = extractPathPrefixes(prompt)
+  if (prefixes.length === 0) return ''
+  const state = dispatchPathsState()
+  pruneDispatchPaths(state, ctx, ttlMs, Date.now())
+  const reminder = overlapReminderFor(state, callerSessionId, prefixes)
+  const entries = Array.isArray(state.get(callerSessionId)) ? state.get(callerSessionId) : []
+  entries.push({ childId: childSessionId, task, prefixes, at: Date.now() })
+  while (entries.length > DISPATCH_PATHS_MAX_PER_SESSION) entries.shift()
+  state.set(callerSessionId, entries)
+  return reminder
+}
+
 /**
  * 只读快照（诊断 / 离线单测用）。返回深拷贝，调用方改不坏内部状态。
  *
@@ -1374,6 +1584,7 @@ export function apply(ctx, config) {
         const id = sessionIdOfAgent(payload?.agent)
         if (id === undefined) return
         releaseDispatchClaimsOf(dispatchClaimsState(), id)
+        releaseDispatchPathsOf(dispatchPathsState(), id)
       } catch (error) {
         warn(
           'releasing dispatch claims of a disposed agent threw — a stale claim may outlive the session. ' +
@@ -1834,6 +2045,17 @@ export function apply(ctx, config) {
           )
         }
       }
+      // ── 派发路径重叠提醒（只提醒、绝不拦截）────────────────────────────────
+      // 放在**成功之后**：先登记、再回执。异常一律 catch → 本次派发照常成功。
+      let overlapLine = ''
+      try {
+        overlapLine = rememberDispatchPaths(ctx, callerSessionId, childSessionId, taskSlug, prompt, resolveDispatchTtl(config))
+      } catch (error) {
+        warn(
+          'the dispatch-path overlap check threw; skipping the reminder for this dispatch. ' +
+            'Underlying error: ' + (error instanceof Error ? error.message : String(error)),
+        )
+      }
       return {
         ok: true,
         presetId,
@@ -1845,7 +2067,8 @@ export function apply(ctx, config) {
           'its path from the root, and a `running` row means it is working now. Tell the user ' +
           'what you dispatched, ' +
           'then either end your turn (its completion notice will wake you) or do independent work ' +
-          'that writes different files (a peer write to a file another worker holds is rejected).',
+          'that writes different files (a peer write to a file another worker holds is rejected).' +
+          (overlapLine === '' ? '' : ' ' + overlapLine),
         evidence: {
           broken: null,
           presetId,
@@ -1992,7 +2215,8 @@ export function apply(ctx, config) {
             type: 'string',
             description:
               'The complete, self-contained task, labelled `TASK:` / `INPUT:` / `OUT:`. ' +
-              'The worker runs under a DIFFERENT mode and cannot see this conversation.',
+              'The worker runs under a DIFFERENT mode and cannot see this conversation. ' +
+              'Absolute paths, one per line. When two or more workers will touch the same code, dispatch one inventory worker first and pass its notes file (paths + line ranges) here instead of re-listing source dirs.',
           },
           description: {
             type: 'string',

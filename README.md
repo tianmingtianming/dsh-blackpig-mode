@@ -369,6 +369,14 @@ Skill index (12):
 
 豁免四类：`ask_user_question`、派活工具自身的失败、黑猪自己的策略拒绝、`ABORTED` 系（`ABORTED` / `ABORTED_BEFORE_DISPATCH`）。闸门自身任何异常一律放行，绝不因它崩了堵死派活。
 
+### 派发路径重叠提醒（只提醒，不拦截）
+
+`subagent_preset` 成功派活后，从 brief 的 `INPUT` 抓绝对路径、取**盘符 + 紧跟的 3 段**作为目录前缀（如 `C:\Users\X\Documents`），记进进程内台账 `globalThis[Symbol.for('dsh-blackpig-mode:dispatch-paths:v1')]`（每会话上限 50 条，先进先出；TTL 与派发去重表一致，`agent/disposed` 释放）。下一次派活若前缀与本会话此前派出的 worker 重叠（一方是另一方的前缀），成功回执末尾追加一行：
+
+`Overlap: worker <对手 id 前 8 位> already covered <前缀>(<n> paths). If 2+ workers share this area, reuse it via send_to_subagent or pass an inventory notes file as INPUT.`
+
+阈值：重叠对手 ≥1 且重叠前缀 ≥1；brief 里抓不到路径则不记也不提醒。**它绝不拦截派发**：路径解析、台账读写的任何异常都只 `warn` 并跳过提醒，`ok` / 拒绝语义不变；文案固定，不含时间戳或随机量。
+
 ### 附：人格压缩（同版落地，不属「机制」）
 
 `persona.prefix` 由 **8,105 → 7,285 字符**（按字符/4 粗估约 **2,026 → 1,821 token**；实测日期 2026-11-27）。删掉的是**已被代码接管**的提醒（机制会拦的事不再靠人格反复叮嘱），新增一条判据：**一条 brief = 一个产物**——说不清具体产物、或要读 ≥5 个不相关文件，就按产物拆，不按阶段拆。同轮再次收敛（2026-11-27）：`**Every brief stands alone.**` 那句 132 → 95 字符，人格总量 **7,285 → 7,248 字符**（段数仍 10）。
