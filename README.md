@@ -371,7 +371,7 @@ Skill index (12):
 
 ### 派发路径重叠提醒（只提醒，不拦截）
 
-`subagent_preset` 成功派活后，从 brief 的 `INPUT` 抓绝对路径、取**盘符 + 紧跟的 3 段**作为目录前缀（如 `C:\Users\X\Documents`），记进进程内台账 `globalThis[Symbol.for('dsh-blackpig-mode:dispatch-paths:v1')]`（每会话上限 50 条，先进先出；TTL 与派发去重表一致，`agent/disposed` 释放）。下一次派活若前缀与本会话此前派出的 worker 重叠（一方是另一方的前缀），成功回执末尾追加一行：
+`subagent_preset` 成功派活后，从 brief 的 `INPUT` 抓绝对路径、取**文件所在目录的完整路径**（去掉文件名；段数 <5 的浅层根如 `C:\Users\X\Documents` 一律不参与），记进进程内台账 `globalThis[Symbol.for('dsh-blackpig-mode:dispatch-paths:v1')]`（每会话上限 50 条，先进先出；TTL 与派发去重表一致，`agent/disposed` 释放）。下一次派活若前缀与本会话此前派出的 worker 重叠（必须在**目录边界**上：`a === b` 或 `a + '\'` 是 `b` 的前缀，或反向；裸 `startsWith` 会让 `...\doc` 命中 `...\docs`），成功回执末尾追加一行：
 
 `Overlap: worker <对手 id 前 8 位> already covered <前缀>(<n> paths). If 2+ workers share this area, reuse it via send_to_subagent or pass an inventory notes file as INPUT.`
 

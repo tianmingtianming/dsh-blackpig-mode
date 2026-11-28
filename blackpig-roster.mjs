@@ -1234,6 +1234,9 @@ export const DISPATCH_PATHS_MAX_PER_SESSION = 50
 /** 从一条 brief 里最多提取多少个路径前缀。 */
 export const DISPATCH_PATH_PREFIX_MAX = 20
 
+/** 参与比对的最小目录段数（含盘符）；`C:\Users\X\Documents` 这类浅层根一律排除。 */
+export const DISPATCH_PATH_MIN_SEGMENTS = 5
+
 /** Windows 绝对路径：盘符 + `\` 或 `/`；到空白 / 引号 / 常见分隔符为止。
  *  负向后行断言排除 `https:` 这类 URL（`s:` 前面是字母），否则 URL 会被误当成 `s:\...`。 */
 const ABSOLUTE_PATH_RE = /(?<![A-Za-z])[A-Za-z]:[\\/][^\s"'`<>|?*]*/g
@@ -1260,13 +1263,16 @@ function dispatchPathsState() {
 }
 
 /**
- * 从 brief 文本里抓绝对路径，取盘符 + 紧跟的 3 段作为前缀。
+ * 从 brief 文本里抓绝对路径，取**文件所在目录的完整路径**（去掉文件名）作为前缀。
  *
- * 例：`C:\Users\X\Documents\proj\a.md` → `C:\Users\X\Documents`。
- * 去重按小写（Windows 路径大小写不敏感），最多 {@link DISPATCH_PATH_PREFIX_MAX} 个。
+ * 例：`C:\Users\X\Documents\proj\src\a.md` → `C:\Users\X\Documents\proj\src`。
+ * 段数（含盘符）< {@link DISPATCH_PATH_MIN_SEGMENTS} 的浅层根不参与比对
+ * （`C:\` / `C:\Users` / `C:\Users\X` / `C:\Users\X\Documents` 都排除），
+ * 否则「都在 Documents 下」会变成每次派活都提醒。去重按小写，最多
+ * {@link DISPATCH_PATH_PREFIX_MAX} 个。
  *
  * @param text - brief 的 `prompt` 原文。
- * @returns {string[]} 前缀（保持原大小写）；抓不到则空数组。
+ * @returns {string[]} 目录前缀（保持原大小写）；抓不到则空数组。
  */
 export function extractPathPrefixes(text) {
   const found = []
@@ -1274,13 +1280,17 @@ export function extractPathPrefixes(text) {
   const seen = new Set()
   try {
     for (const match of text.matchAll(ABSOLUTE_PATH_RE)) {
-      let raw = match[0].replace(PATH_TRAILING_PUNCTUATION_RE, '').replace(/[\\/]+$/, '')
+      let raw = match[0].replace(PATH_TRAILING_PUNCTUATION_RE, '')
+      // 以分隔符结尾的路径本身已是目录，不能再砍最后一段。
+      const endsWithSeparator = /[\\/]$/.test(raw)
+      raw = raw.replace(/[\\/]+$/, '')
       if (!/^[A-Za-z]:[\\/]/.test(raw)) continue
       const parts = raw.split(/[\\/]+/).filter((part) => part !== '')
       if (parts.length < 2) continue
-      // parts[0] 是盘符；「前 3 段」= 盘符后的 3 段，与示例 `C:\Users\X\Documents` 对齐。
-      const head = parts.slice(0, 4)
-      const prefix = head[0] + '\\' + head.slice(1).join('\\')
+      // 去掉文件名（最后一个 segment）；浅层根直接不参与。
+      const dirParts = endsWithSeparator ? parts : parts.slice(0, -1)
+      if (dirParts.length < DISPATCH_PATH_MIN_SEGMENTS) continue
+      const prefix = dirParts[0] + '\\' + dirParts.slice(1).join('\\')
       const key = prefix.toLowerCase()
       if (seen.has(key)) continue
       seen.add(key)
@@ -1294,7 +1304,10 @@ export function extractPathPrefixes(text) {
 }
 
 /**
- * 两个前缀是否重叠：一方是另一方的前缀（大小写不敏感，判据与需求一致）。
+ * 两个前缀是否重叠：**必须在目录边界上匹配**（大小写不敏感）。
+ *
+ * 判据：`a === b`，或 `a + '\'` 是 `b` 的前缀，或反向。不能用裸 `startsWith`——
+ * 那会让 `...\doc` 匹配 `...\docs`。
  *
  * @param a - 前缀 A。
  * @param b - 前缀 B。
@@ -1304,7 +1317,8 @@ function prefixIsRelated(a, b) {
   if (typeof a !== 'string' || typeof b !== 'string' || a === '' || b === '') return false
   const left = a.toLowerCase()
   const right = b.toLowerCase()
-  return left.startsWith(right) || right.startsWith(left)
+  if (left === right) return true
+  return left.startsWith(right + '\\') || right.startsWith(left + '\\')
 }
 
 /**
@@ -1354,6 +1368,24 @@ function releaseDispatchPathsOf(state, childSessionId) {
 }
 
 /**
+ * 回执里显示过长的目录前缀：保留盘符 + 末 N 段（`C:\...\proj\docs`），只影响显示，
+ * 比对始终用完整前缀。固定规则、不含随机量。
+ *
+ * @param prefix - 完整前缀。
+ * @param budget - 可用字符数。
+ * @returns {string}
+ */
+function abbreviatePrefixForReceipt(prefix, budget) {
+  if (prefix.length <= budget) return prefix
+  const parts = prefix.split('\\').filter((part) => part !== '')
+  for (let keep = Math.min(parts.length - 1, 3); keep >= 1; keep--) {
+    const candidate = parts[0] + ':\\...\\' + parts.slice(-keep).join('\\')
+    if (candidate.length <= budget) return candidate
+  }
+  return prefix.slice(0, Math.max(0, budget - 3)) + '...'
+}
+
+/**
  * 生成本次派发的重叠提醒（固定一行，≤200 字符）。
  *
  * 阈值：重叠对手 ≥1 且重叠前缀 ≥1；否则返回空串（回执一个字都不加）。
@@ -1391,9 +1423,9 @@ function overlapReminderFor(state, callerSessionId, prefixes) {
     `(${hitPrefixes.size} paths). If 2+ workers share this area, reuse it via send_to_subagent ` +
     'or pass an inventory notes file as INPUT.'
   const head = `Overlap: worker ${shortId} already covered `
-  // 固定格式、上限 200：超长前缀按字符截断（不含任何时间/随机量）。
+  // 固定格式、上限 200：超长前缀缩成「盘符 + 末段」，显示层处理，不改变比对用的完整前缀。
   const budget = 200 - head.length - suffix.length
-  const shown = hit.prefix.length <= budget ? hit.prefix : hit.prefix.slice(0, Math.max(0, budget - 3)) + '...'
+  const shown = abbreviatePrefixForReceipt(hit.prefix, budget)
   return head + shown + suffix
 }
 
