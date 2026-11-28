@@ -123,7 +123,7 @@ function Find-PresetDeclaration {
 $expected = [ordered]@{
     'cordis.patch.yml'    = 0   # 不参与严格字节校验（人格随编辑变化；5/5 用段数+needle 断言）
     'guard-v10.mjs'       = 210793   # 2026-11-27：批四改动后实测（原 2026-11-24 值 192713）
-    'blackpig-roster.mjs' = 94012   # 2026-11-27：派活描述补「OUT 写明证据形式」后实测（原 93923）
+    'blackpig-roster.mjs' = 95568   # 2026-11-28：被动刷新（消费 delegate 记下的 childId）后实测（原 94012）
     'blackpig-file-guard.mjs' = 21028   # 2026-11-27：写冲突守卫
     'blackpig-watchdog.mjs'   = 40364   # 2026-11-27 新增：父侧卡死看门狗（四证判活，唤而不杀）
     'subtalk.mjs'         = 59511   # 2026-11-27：同上（原 59424）

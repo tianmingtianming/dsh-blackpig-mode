@@ -617,7 +617,33 @@ async function collectLive(ctx, selfId, options = {}) {
       }
       let toolNames
       let source
-      if (isPtcexecutor(presetPlugins) || row.id === 'ptc') {
+      // ② Passive refresh — `delegate` records the child it spawned (`recordChildCapture`),
+      // but writing `childId` alone never changed the visible table. Consume that child
+      // *before* the cache-hit branch: if it finished after `capturedAt`, its request
+      // header is a free, newer sample and must win over a stale cache entry.
+      // Executor modes stay out of the cache entirely, as before.
+      let refreshed = null
+      if (capture === true && !isPtcexecutor(presetPlugins) && row.id !== 'ptc') {
+        refreshed = await latestChildCapture(row.id, cached)
+        if (refreshed === null) {
+          // `listDescendants` rows carry no preset id (rc.5 keys: mode/label/id/name/
+          // kind/parentId/depth/path/activity/hasChildren), so the preset scan above
+          // cannot associate a `delegate` child with this row. Fall back to the exact
+          // child id `recordChildCapture` already wrote.
+          const recordedId = typeof cached?.childId === 'string' ? cached.childId.trim() : ''
+          if (recordedId !== '') {
+            const real = await readRealTools(ctx, recordedId)
+            if (real !== null && real.length > 0) refreshed = { childId: recordedId, tools: real }
+          }
+        }
+      }
+      if (refreshed !== null) {
+        toolNames = refreshed.tools
+        source = 'captured'
+        await writeToolsCache(ctx, cachePath, (presetsOut) => {
+          presetsOut[row.id] = { tools: refreshed.tools, capturedAt: Date.now(), childId: refreshed.childId }
+        }, warn)
+      } else if (isPtcexecutor(presetPlugins) || row.id === 'ptc') {
         // ① 执行器：注册面是整套被代理的工具，下发面只有 run_code。不实测、不缓存。
         toolNames = [PTC_TOOL]
         source = 'executor'
