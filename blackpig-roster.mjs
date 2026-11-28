@@ -1234,8 +1234,9 @@ export const DISPATCH_PATHS_MAX_PER_SESSION = 50
 /** 从一条 brief 里最多提取多少个路径前缀。 */
 export const DISPATCH_PATH_PREFIX_MAX = 20
 
-/** Windows 绝对路径：盘符 + `\` 或 `/`；到空白 / 引号 / 常见分隔符为止。 */
-const ABSOLUTE_PATH_RE = /[A-Za-z]:[\\/][^\s"'`<>|?*]*/g
+/** Windows 绝对路径：盘符 + `\` 或 `/`；到空白 / 引号 / 常见分隔符为止。
+ *  负向后行断言排除 `https:` 这类 URL（`s:` 前面是字母），否则 URL 会被误当成 `s:\...`。 */
+const ABSOLUTE_PATH_RE = /(?<![A-Za-z])[A-Za-z]:[\\/][^\s"'`<>|?*]*/g
 
 /** 紧贴路径的正文标点不属于路径。 */
 const PATH_TRAILING_PUNCTUATION_RE = /[.,;:!?)\]}'"`，。；：、）】》]+$/
